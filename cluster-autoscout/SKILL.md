@@ -34,6 +34,12 @@ Loading this skill defines, in your python kernel:
   `tier` is `available` (idle/mix nodes now) or `queue` (meets the resource
   requirement but nothing free — ordered by fewest pending).
 - `gpus_from_gres(gres)` → GPU count from a SLURM gres string.
+- `plan_fanout(cands, n_jobs, accounts=None)` → deterministic dispatch **plan**
+  for `n_jobs`: a list of `{job, provider, partition, account, tier, immediate}`,
+  round-robined across the `available` tier (filling idle capacity first, then
+  overflow to the queue), with `--account` filled in per provider. **Plans only —
+  it does NOT submit.** Feed each entry to the `remote-compute-ssh` submit flow
+  (which still shows a per-job approval card).
 
 ## Workflow
 
@@ -77,8 +83,25 @@ Use `best["provider"]` and `best["partition"]` with the `remote-compute-ssh`
 submit flow. Pull the correct `--account` from that provider's
 `compute_details` doc (accounts are per-host, not discoverable by scan).
 
-For a fan-out, walk `cands` in order and round-robin across the `available`
-tier so you spread load across clusters/partitions rather than piling onto one.
+For a fan-out, don't hand-roll the assignment loop — call `plan_fanout` to
+get a deterministic, account-filled dispatch plan, then submit each entry.
+**The agent still decides whether to fan out and how many jobs; `plan_fanout`
+only does the mechanical round-robin + account lookup; and every `submit_job`
+still shows the user an approval card.**
+
+```python
+# python tool — build the plan (accounts come from each provider's compute_details)
+accounts = {"ssh:clusterA": "acctA", "ssh:clusterB": "acctB"}
+plan = plan_fanout(cands, n_jobs=8, accounts=accounts)
+for p in plan:
+    print(p)   # {job, provider, partition, account, tier, immediate}
+```
+
+`immediate=True` entries map onto idle nodes now; `immediate=False` will queue.
+If any `account` is `None`, fill it from that provider's `compute_details`
+before submitting. Then walk `plan` and issue one `remote-compute-ssh`
+`submit_job` per entry (each gated by user approval). Re-scan and re-plan for
+each fresh fan-out — availability drifts.
 
 ## Notes
 - Node **state** is the availability signal: `idle` (fully free) and `mix`

@@ -134,3 +134,85 @@ def rank_partitions(scans, need_gpus=0, min_nodes=1):
         c["pending_jobs"] if c["tier"] == "available" else -c["total_nodes"],
     ))
     return cands
+
+def plan_fanout(cands, n_jobs, accounts=None):
+    """Turn a ranked candidate list into a deterministic dispatch plan for
+    n_jobs, round-robined across the least-contended targets. PLANS ONLY —
+    it never submits; feed each entry to the remote-compute-ssh submit flow
+    (which still shows the user a per-job approval card).
+
+    cands:    output of rank_partitions() (best-first, each carrying 'tier').
+    n_jobs:   how many jobs to place (>= 1).
+    accounts: {provider_name: --account string}. A provider missing here gets
+              account=None (caller must fill it before submit).
+
+    Strategy (encodes the house rule):
+      * Prefer the 'available' tier. Phase A fills idle node capacity
+        round-robin across those partitions (avail_nodes slots), so jobs land
+        and run now and load is spread rather than piled on one cluster.
+      * Phase B places any overflow round-robin across the same available
+        pool; those jobs will queue (immediate=False).
+      * If NOTHING is in the available tier, fall back to the 'queue' tier
+        (lowest-wait first, as ranked) and round-robin there.
+
+    Returns a list of dispatch dicts, one per job, in submission order:
+      {job, provider, partition, account, tier, immediate}
+    where immediate=True means the job maps onto idle capacity right now, and
+    tier reflects that ('available' when immediate else 'queue') even for a
+    partition that is itself in the available tier but whose idle slots are
+    already spoken for by earlier jobs in this plan.
+
+    >>> cands = [
+    ...   {"provider":"ssh:A","partition":"gpu","avail_nodes":2,
+    ...    "gpus_per_node":4,"pending_jobs":0,"tier":"available","total_nodes":10},
+    ...   {"provider":"ssh:B","partition":"gpu","avail_nodes":1,
+    ...    "gpus_per_node":4,"pending_jobs":3,"tier":"available","total_nodes":8}]
+    >>> accts = {"ssh:A":"acctA","ssh:B":"acctB"}
+    >>> [(p["provider"], p["immediate"]) for p in plan_fanout(cands, 4, accts)]
+    [('ssh:A', True), ('ssh:B', True), ('ssh:A', True), ('ssh:A', False)]
+    >>> [(p["provider"], p["account"]) for p in plan_fanout(cands, 2, {"ssh:A":"acctA"})]
+    [('ssh:A', 'acctA'), ('ssh:B', None)]
+    >>> q = [{"provider":"ssh:A","partition":"gpu","avail_nodes":0,
+    ...       "gpus_per_node":4,"pending_jobs":1,"tier":"queue","total_nodes":10}]
+    >>> [p["immediate"] for p in plan_fanout(q, 2)]
+    [False, False]
+    """
+    if n_jobs < 1:
+        raise ValueError("n_jobs must be >= 1")
+    accounts = accounts or {}
+    avail = [c for c in cands if c.get("tier") == "available"]
+    tier = "available" if avail else "queue"
+    pool = avail if avail else [c for c in cands if c.get("tier") == "queue"]
+    if not pool:
+        raise ValueError("no candidate partitions to dispatch to")
+
+    plan = []
+
+    def _assign(c, immediate):
+        plan.append({"job": len(plan), "provider": c["provider"],
+                     "partition": c["partition"],
+                     "account": accounts.get(c["provider"]),
+                     "tier": "available" if immediate else "queue",
+                     "immediate": immediate})
+
+    # Phase A: fill idle capacity round-robin (available tier only)
+    cap = [c["avail_nodes"] for c in pool] if tier == "available" else []
+    if tier == "available":
+        progressed = True
+        while len(plan) < n_jobs and progressed:
+            progressed = False
+            for i, c in enumerate(pool):
+                if len(plan) >= n_jobs:
+                    break
+                if cap[i] > 0:
+                    cap[i] -= 1
+                    _assign(c, True)
+                    progressed = True
+
+    # Phase B: overflow (available tier) or the whole plan (queue tier)
+    i = 0
+    while len(plan) < n_jobs:
+        _assign(pool[i % len(pool)], False)
+        i += 1
+    return plan
+
