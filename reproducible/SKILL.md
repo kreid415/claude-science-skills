@@ -230,17 +230,45 @@ The scaffold is not a dump of one-off scripts. Refactor shared logic into an ins
 tested library, and make experiment scripts and `audit/verify.py` thin wrappers that import it — that is
 what lets the re-run harness actually re-derive results *through the same code path*, which is the proof
 a reviewer needs.
-- **Functional:** extract repeated logic (data stats, pooling, probes, models, metrics) into a package
-  under `src/`; prefer pure, typed functions with explicit inputs/outputs. `pyproject.toml` makes it
-  `pip install -e .`-able (with `[test]` and `[experiments]` extras).
-- **Documented:** every public function carries a docstring with parameters, returns, and a worked
-  example. Collect modules under pytest `--doctest-modules` so the examples are executed.
+- **Functional & consolidated — one home per concept.** Extract repeated logic (data stats, pooling,
+  probes, models, metrics) into a package under `src/`; prefer pure, typed functions with explicit
+  inputs/outputs. `pyproject.toml` makes it `pip install -e .`-able (with `[test]` and `[experiments]`
+  extras). **No bespoke logic in experiment files** — an experiment script is a thin wrapper that
+  *imports* the library and orchestrates; if you catch yourself re-implementing a probe/head/metric that
+  already exists (or writing one an experiment file shouldn't own), move it into the library and call it.
+  When two experiments need slightly different behaviour, **parameterize the one library function** (add
+  a keyword, keep defaults backward-compatible) rather than forking a near-duplicate — one code path,
+  semantically consolidated, is what makes the file easiest for a human to parse.
+- **Standard libraries first.** Reach for numpy / pandas / scikit-learn / stdlib before hand-rolling
+  (e.g. `sklearn.model_selection.train_test_split` for a stratified split, `StandardScaler` for
+  z-scoring). Bespoke re-implementations of standard operations are harder to audit and a common source
+  of subtle bugs.
+- **Documented — every function AND the code flow.** Every public function carries a docstring with
+  parameters, returns, and a worked example (collect modules under pytest `--doctest-modules` so the
+  examples are executed). Beyond per-function docs, each experiment script opens with a **module
+  docstring that narrates the code flow** — a numbered map of what each block does (load -> features ->
+  fit -> evaluate -> figure) — and marks those blocks inline with `# === n. STAGE ===` headers so a
+  human can scan the file top-to-bottom and see the pipeline without reading every line. **In the main
+  analysis, each stage's comment must explain WHY the step is done and HOW it works, not just what it
+  is** — the scientific rationale (what question this block answers, why it comes here, what would break
+  the argument if it were wrong) and the mechanism (how the computation achieves it: which estimator,
+  what the ablation/normalisation actually does, why these settings). Prefer a two-line `# WHY: ...` /
+  `# HOW: ...` pair over a bare label. A reader who knows the domain but not this file should be able to
+  reconstruct the experiment's logic from the comments alone. No undocumented block: if a reader can't
+  tell what a stretch of code does and why, it isn't done.
 - **Tested:** a `tests/` suite with per-module unit tests on synthetic data with known structure, plus an
   **end-to-end regression test** that reproduces a committed result *through the refactored library* and
   asserts equality within tolerance (proof a refactor preserved behaviour, not just a claim it did).
   `audit/verify.py` can call these, or share their recompute functions.
-- Verify green (`pytest`) BEFORE committing. `.gitignore` build metadata (`*.egg-info/`,
-  `.pytest_cache/`, `__pycache__/`).
+- **Linted:** the repo carries a `ruff` contract in `pyproject.toml` (`[tool.ruff]` with an explicit
+  `line-length`, `target-version`, and `lint.select` rule set) and `ruff` is in the `test` extra. The
+  library, `tests/`, and every refactored experiment must pass `ruff check .` clean. Pre-refactor
+  bespoke scripts still queued for consolidation go in `extend-exclude` with a comment saying so —
+  remove each entry as its file is cleaned up, so the lint surface grows monotonically toward the whole
+  repo. Run `ruff check --fix` for the mechanical fixes; fix ambiguous names / multi-statement lines by
+  hand.
+- Verify green (`ruff check .` AND `pytest`) BEFORE committing. `.gitignore` build metadata
+  (`*.egg-info/`, `.pytest_cache/`, `__pycache__/`, `.ruff_cache/`).
 
 ## Notes
 - `.gitignore` must KEEP `results/` and `audit/` (they ARE the verifiable output) while ignoring bulk data
