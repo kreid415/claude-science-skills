@@ -9,7 +9,8 @@ Pick the least-contended cluster+partition for a remote job, across ALL
 connected SSH hosts, before submitting. This encodes the house rule:
 **use the partition with the most idle nodes / least wait; if nothing is free,
 target the lowest-wait partition for the required resource level; spread jobs
-across clusters when needed.**
+across clusters when needed. When you request the walltime, ask for more time
+than you estimate — a Slurm `--time` kill loses the whole run (see `## Walltime`).**
 
 This skill is the *targeting* layer. Once you have a target, `remote-compute-ssh`
 covers the actual `submit_job` → `wait_for_notification` → `save_artifacts` flow.
@@ -82,6 +83,8 @@ print(best)   # {provider, partition, gpus_per_node, avail_nodes, tier, ...}
 Use `best["provider"]` and `best["partition"]` with the `remote-compute-ssh`
 submit flow. Pull the correct `--account` from that provider's
 `compute_details` doc (accounts are per-host, not discoverable by scan).
+Set `--time` to a padded multiple of your runtime estimate, not the estimate
+itself — see `## Walltime`.
 
 For a fan-out, don't hand-roll the assignment loop — call `plan_fanout` to
 get a deterministic, account-filled dispatch plan, then submit each entry.
@@ -103,6 +106,34 @@ before submitting. Then walk `plan` and issue one `remote-compute-ssh`
 `submit_job` per entry (each gated by user approval). Re-scan and re-plan for
 each fresh fan-out — availability drifts.
 
+## Walltime — request more time than you estimate
+
+On Slurm, `--time` is a hard wall: the moment a job reaches it the scheduler
+kills it (`CANCELLED ... DUE TO TIME LIMIT`) and everything the run had done is
+lost. The house rule is to size the request against the worst case, not the
+expected one:
+
+- **Pad the estimate.** Request roughly **2–3× a confident runtime estimate**,
+  and more when it's the first run of this tool on this host, when the estimate
+  is really a guess, or when runtime scales with input size. Early exit is free
+  — a job that finishes before its walltime releases the node immediately, so
+  padding costs at most a slightly worse queue position, while under-requesting
+  costs the entire allocation. Always err on the side of more time.
+- **This is a sizing judgment, not a scan output.** `rank_partitions` /
+  `plan_fanout` pick *where* a job lands; they do not set `--time`. You choose
+  the walltime per job (with the user's approval on the submit card) — the scan
+  never fills it in.
+- **Match `timeout_seconds` to the padded walltime.** In the `remote-compute-ssh`
+  submit flow, keep `timeout_seconds` (how long the local poller waits) at or
+  above the `--time` you requested, so the harvest waits out the padded
+  allocation instead of giving up while the job is still running.
+- **On a walltime kill, resubmit larger.** If a job dies with
+  `DUE TO TIME LIMIT`, the estimate was too tight — resubmit with a bigger
+  multiple, not the same value.
+
+PBS (`-l walltime=`) and LSF (`-W`) enforce their time limits the same way;
+pad them the same way.
+
 ## Notes
 - Node **state** is the availability signal: `idle` (fully free) and `mix`
   (partially free) can take a job now; `alloc`/`drain`/`maint`/`down` cannot.
@@ -112,3 +143,5 @@ each fresh fan-out — availability drifts.
   not from the scan.
 - Scan is cheap (`sinfo`/`squeue`, seconds) — re-scan for each fresh fan-out
   since availability drifts.
+- Walltime is a per-job sizing choice, not part of targeting — pad it
+  generously (see `## Walltime`); a Slurm `--time` kill loses the whole run.
