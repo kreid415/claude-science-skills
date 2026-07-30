@@ -10,7 +10,10 @@ connected SSH hosts, before submitting. This encodes the house rule:
 **use the partition with the most idle nodes / least wait; if nothing is free,
 target the lowest-wait partition for the required resource level; spread jobs
 across clusters when needed. When you request the walltime, ask for more time
-than you estimate — a Slurm `--time` kill loses the whole run (see `## Walltime`).**
+than you estimate — a Slurm `--time` kill loses the whole run (see `## Walltime`).
+All actual computation runs on compute nodes via the scheduler, never on the
+login node — the login node is only for the cheap scans below (see
+`## Compute nodes, not login nodes`).**
 
 This skill is the *targeting* layer. Once you have a target, `remote-compute-ssh`
 covers the actual `submit_job` → `wait_for_notification` → `save_artifacts` flow.
@@ -63,6 +66,8 @@ out = {}
 # provider names it returned:
 for prov in ["ssh:clusterA", "ssh:clusterB"]:
     c = host.compute.create(prov)
+    # call_command runs on the LOGIN node — fine here: this is a cheap seconds-long
+    # scan, not a workload. Never run compute this way (see below).
     r = c.call_command(scan_cmd, intent=f"scan {prov} partition availability", login_shell=True)
     out[prov] = r.get("stdout","")
     c.close()
@@ -134,6 +139,29 @@ expected one:
 PBS (`-l walltime=`) and LSF (`-W`) enforce their time limits the same way;
 pad them the same way.
 
+## Compute nodes, not login nodes
+
+The whole point of targeting a partition is to land the workload on a **compute
+node** via the scheduler. The login node is shared infrastructure for every
+user on the cluster — running compute there crowds out other people's
+interactive sessions and gets accounts throttled or suspended by admins.
+
+The line is simple:
+
+- **Login node — cheap orchestration only.** `c.call_command(...)` runs on the
+  login node. Use it only for what this skill's scans and quick probes need:
+  `sinfo`/`squeue` (the `SCAN_CMD` above), `which <tool>`, `module avail`,
+  `conda env list`, `ls` of a scratch path — seconds-long, near-zero CPU/memory.
+- **Compute node — all real work.** Every actual computation goes through
+  `c.submit_job(...)` with scheduler directives (`#SBATCH ...`), so Slurm places
+  it on a compute node. Never wrap a heavy command in `call_command` to skip the
+  queue; that runs it on the login node. If a tool needs a build/compile step
+  heavy enough to strain the login node, submit that as its own short job too.
+- **`scheduler: none` hosts.** A bare host (`scheduler: none` in
+  `compute_details`) has no compute-node isolation — a `submit_job` there
+  direct-execs on the one machine. Flag that to the user before running anything
+  heavy rather than silently loading the login/head node.
+
 ## Notes
 - Node **state** is the availability signal: `idle` (fully free) and `mix`
   (partially free) can take a job now; `alloc`/`drain`/`maint`/`down` cannot.
@@ -145,3 +173,6 @@ pad them the same way.
   since availability drifts.
 - Walltime is a per-job sizing choice, not part of targeting — pad it
   generously (see `## Walltime`); a Slurm `--time` kill loses the whole run.
+- Compute always runs on a compute node via `submit_job`; the login node
+  (`call_command`) is only for the cheap scans/probes here (see
+  `## Compute nodes, not login nodes`).
