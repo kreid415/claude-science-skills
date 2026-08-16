@@ -216,3 +216,34 @@ def plan_fanout(cands, n_jobs, accounts=None):
         i += 1
     return plan
 
+
+def scratch_env_preamble(scratch_root, conda_env=None, tmp_subdir="tmp"):
+    """Shell preamble that redirects envs, caches and tmp onto cluster scratch.
+
+    scratch_root -- this host's per-user scratch dir, from its compute_details
+        doc (e.g. "$HOME/scr4_gsteino1/$USER" on Rockfish,
+        "/scratch/gsteino1/$USER" on DSAI). Group-scoped on most clusters, so
+        always include $USER unless compute_details says otherwise.
+    conda_env -- optional absolute env path (itself under scratch) to activate.
+
+    Paste the returned block at the top of a submit_job command, right after the
+    #SBATCH directives. See SKILL.md "## Scratch first".
+    """
+    lines = [
+        'SCRATCH="%s"' % scratch_root,
+        'mkdir -p "$SCRATCH"/{%s,conda/envs,conda/pkgs,pip,hf,torch,xdg,mpl,apptainer}' % tmp_subdir,
+        'export TMPDIR="$SCRATCH/%s"' % tmp_subdir,
+        'export CONDA_ENVS_PATH="$SCRATCH/conda/envs"',
+        'export CONDA_PKGS_DIRS="$SCRATCH/conda/pkgs"',
+        'export PIP_CACHE_DIR="$SCRATCH/pip"',
+        'export HF_HOME="$SCRATCH/hf"',
+        'export TORCH_HOME="$SCRATCH/torch"',
+        'export XDG_CACHE_HOME="$SCRATCH/xdg"',
+        'export MPLCONFIGDIR="$SCRATCH/mpl"',
+        'export APPTAINER_CACHEDIR="$SCRATCH/apptainer"',
+        'export SINGULARITY_CACHEDIR="$SCRATCH/apptainer"',
+    ]
+    if conda_env:
+        lines.append('source "$(conda info --base)/etc/profile.d/conda.sh"')
+        lines.append('conda activate "%s"' % conda_env)
+    return "\n".join(lines) + "\n"

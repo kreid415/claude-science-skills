@@ -1,6 +1,6 @@
 ---
 name: cluster-autoscout
-description: Scan every connected SSH/SLURM cluster for available nodes and pick the best partition+account for a job by immediate availability, then lowest wait. Use before dispatching remote GPU or CPU compute when you want the job to land on whichever cluster/partition is least contended right now, and to spread jobs across multiple clusters. Complements remote-compute-ssh (which covers the submit/harvest workflow once a target is chosen).
+description: Scan every connected SSH/SLURM cluster for available nodes and pick the best partition+account for a job by immediate availability, then lowest wait. Use before dispatching remote GPU or CPU compute when you want the job to land on whichever cluster/partition is least contended right now, and to spread jobs across multiple clusters. Also covers placing job data, caches and conda environments on cluster scratch instead of home. Complements remote-compute-ssh (which covers the submit/harvest workflow once a target is chosen).
 ---
 
 # cluster-autoscout
@@ -13,7 +13,9 @@ across clusters when needed. When you request the walltime, ask for more time
 than you estimate — a Slurm `--time` kill loses the whole run (see `## Walltime`).
 All actual computation runs on compute nodes via the scheduler, never on the
 login node — the login node is only for the cheap scans below (see
-`## Compute nodes, not login nodes`).**
+`## Compute nodes, not login nodes`). Everything a job writes or caches —
+inputs, outputs, tmp, pip/HF/torch caches, and conda environments themselves —
+lives on cluster scratch, never in `$HOME` (see `## Scratch first`).**
 
 This skill is the *targeting* layer. Once you have a target, `remote-compute-ssh`
 covers the actual `submit_job` → `wait_for_notification` → `save_artifacts` flow.
@@ -38,6 +40,11 @@ Loading this skill defines, in your python kernel:
   `tier` is `available` (idle/mix nodes now) or `queue` (meets the resource
   requirement but nothing free — ordered by fewest pending).
 - `gpus_from_gres(gres)` → GPU count from a SLURM gres string.
+- `scratch_env_preamble(scratch_root, conda_env=None)` → shell block that points
+  `TMPDIR`, `CONDA_ENVS_PATH`, `CONDA_PKGS_DIRS`, `PIP_CACHE_DIR`, `HF_HOME`,
+  `TORCH_HOME`, `XDG_CACHE_HOME`, `MPLCONFIGDIR` and the Apptainer cache dirs at
+  scratch, and optionally activates a scratch-resident conda env. Paste it at the
+  top of a `submit_job` command, after the `#SBATCH` lines (see `## Scratch first`).
 - `plan_fanout(cands, n_jobs, accounts=None)` → deterministic dispatch **plan**
   for `n_jobs`: a list of `{job, provider, partition, account, tier, immediate}`,
   round-robined across the `available` tier (filling idle capacity first, then
@@ -162,6 +169,74 @@ The line is simple:
   direct-execs on the one machine. Flag that to the user before running anything
   heavy rather than silently loading the login/head node.
 
+## Scratch first
+
+**Default rule: on an HPC cluster, everything bulky lives on scratch, not in
+`$HOME`.** Home directories are small, quota'd, often backed up (so writing
+churn there is expensive for the site), and on some clusters not even mounted
+the same way on compute nodes. Scratch is the large, fast, parallel filesystem
+the cluster provides for exactly this. Put on scratch:
+
+- **Job working directories** — inputs staged in, all outputs, logs, checkpoints.
+- **`TMPDIR`** — never let a job default to `/tmp` on the node or to `$HOME`.
+- **Conda environments and their package cache** — envs are tens of GB; build
+  them under scratch via `CONDA_ENVS_PATH` / `CONDA_PKGS_DIRS` (or
+  `conda create -p /path/on/scratch/envs/<name>`), and use `pip --cache-dir`
+  under scratch too. Same for Python venvs (`python -m venv /scratch/.../venv`).
+- **Model weights and dataset caches** — `HF_HOME`, `TORCH_HOME`,
+  `XDG_CACHE_HOME`, `MPLCONFIGDIR`.
+- **Container images** — `APPTAINER_CACHEDIR` / `SINGULARITY_CACHEDIR`, and the
+  `.sif` files themselves.
+
+Keep in `$HOME` only small, hand-written, long-lived things: dotfiles, SSH
+config, git checkouts of source code, small config/registry JSON.
+
+### Find the right scratch path first
+
+Scratch layout is per-host and frequently **group-scoped** — `/scratch/$USER`
+is often not writable while `/scratch/<group>/$USER` is. Read the host's
+`compute_details` doc first; if it doesn't record a scratch root, probe once on
+the login node (cheap, allowed) and then **write the answer back into
+`compute_details`** so the next session doesn't re-derive it:
+
+```
+for d in /scratch /scratch4 /scratch16 /weka/scratch "$HOME"/scr*_* "$HOME"/scratch*; do
+  [ -e "$d" ] && printf '%s -> %s\n' "$d" "$(readlink -f "$d")"
+done
+df -h "$HOME" | tail -1                     # how tight is home?
+ls -d /scratch/*/$USER 2>/dev/null            # group-scoped candidates
+```
+
+Confirm the candidate is writable and has room (`[ -w "$d" ]`, `df -h "$d"`)
+before committing a build to it.
+
+### Use it in a job
+
+```python
+# python tool — build the preamble (helper is defined by this skill)
+pre = scratch_env_preamble("/scratch/gsteino1/$USER/myproj",
+                           conda_env="/scratch/gsteino1/$USER/myproj/conda/envs/analysis")
+command = "#!/bin/bash\n#SBATCH --partition=cpu\n#SBATCH --time=12:00:00\n" + pre + "python run.py"
+```
+
+Then submit `command` through the `remote-compute-ssh` flow. Build the env
+**once** as its own short job (a `conda create` + `pip install torch` blows past
+the 60 s `call_command` cap), record its path in `compute_details`, and reuse it
+across every later job instead of rebuilding.
+
+### Scratch is not permanent
+
+Most sites purge scratch on an age policy (commonly 30–90 days untouched) and
+do not back it up. So:
+
+- **Harvest what matters.** Pull final results back as artifacts
+  (`save_artifacts`) rather than leaving them as the only copy on scratch.
+- **Treat a scratch conda env as rebuildable**, not precious — keep the
+  `conda create` / `pip install` recipe in `compute_details` so it can be
+  reconstructed after a purge.
+- Long-lived shared data belongs on the site's project/data filesystem
+  (e.g. a `~/data_<group>` mount) if one exists, not scratch.
+
 ## Notes
 - Node **state** is the availability signal: `idle` (fully free) and `mix`
   (partially free) can take a job now; `alloc`/`drain`/`maint`/`down` cannot.
@@ -176,3 +251,8 @@ The line is simple:
 - Compute always runs on a compute node via `submit_job`; the login node
   (`call_command`) is only for the cheap scans/probes here (see
   `## Compute nodes, not login nodes`).
+- Data, caches and conda envs go on **scratch**, not `$HOME` — resolve the
+  host's scratch root from `compute_details` (it is usually group-scoped) and
+  emit the env block with `scratch_env_preamble` (see `## Scratch first`).
+- Scratch is purged and unbacked: harvest results to artifacts, and keep the
+  env build recipe in `compute_details` so a purged env can be rebuilt.
