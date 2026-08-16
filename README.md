@@ -52,13 +52,6 @@ the handoff artifact that lets a fresh session continue without losing the
 thread. Rotation is judged on task boundaries first and size second. Thresholds
 are derived from measured session data rather than convention.
 
-### `section-enrichment`
-Enrich an already-drafted prose section of a technical book or paper in place,
-one subsection at a time, discussing proposed changes before applying them.
-Runs a correctness review, adds citations verified by identifier, converts
-markdown tables to LaTeX, adds teaching code snippets, finishes real figures
-(TikZ, matplotlib), converts bullet lists into prose, then compiles to verify.
-
 ## Layout
 
 ```
