@@ -148,6 +148,15 @@ Figure QA (`dg_figure_qa`, `dg_overlap_check`) catches blank panels, near-duplic
 ### `run-status-board`
 One status artifact per long remote run, computed only from the expected manifest, the outputs actually present and valid (via `fl_completion_gate`), and scheduler accounting (`sacct`/`squeue` parsers covering array tasks, OOM, TIMEOUT and requeues). Every unit is classified as done-valid, done-invalid, running, pending, failed or missing. `rs_eta` gives a throughput-based ETA and refuses one until enough units finish. All status answers quote the board and its timestamp. Queries only explicit job ids; never account-wide commands.
 
+### `variant-annotation`
+Annotate and interpret human DNA variants. Normalizes VCF records (`bcftools norm`) and rsID/HGVS/chr-pos-ref-alt inputs (Ensembl variant_recoder, REF check against the genome), predicts consequences with the Ensembl VEP REST API (GRCh38 or GRCh37) including AlphaMissense and REVEL scores, looks up ClinVar significance and review status through NCBI E-utilities, and retrieves gnomAD frequencies through the GraphQL API. `acmg_evidence_hints` frames PM2, BA1, PP3 and BP4 using published ClinGen score calibrations. Every merged table carries per-source provenance (endpoint, release, timestamp), and the skill documents label leakage between predictor training data and ClinVar releases. Research support, not clinical classification. REVEL is licensed for non-commercial use only.
+
+### `variant-calling`
+Germline and somatic short-read variant calling from BAM/CRAM. `check_bam_inputs` checks sort order, index, read groups and reference/contig consistency before calling. Command builders cover `bcftools mpileup | call`, the GATK HaplotypeCaller GVCF workflow (GenomicsDBImport or CombineGVCFs, then GenotypeGVCFs), GATK hard filters and the Mutect2 chain. They return shell strings that `run_cmd` executes and fails loudly on. `vcf_qc_summary` reports per-sample Ti/Tv, het/hom-alt, indel counts, missingness and depth, cross-checked against `bcftools stats`. `scripts/simulate_test_data.py` builds a seeded multi-sample test set.
+
+### `gwas-analysis`
+Genome-wide association studies with plink2 and regenie. Builds QC command chains (call rate, MAF, controls-only HWE, heterozygosity, KING relatedness, sex check), LD pruning and PCA covariates, plink2 `--glm` and regenie step 1/step 2 (with Firth for binary traits), and LD clumping. `load_sumstats` standardizes plink2 and regenie outputs. `genomic_inflation`, `manhattan_plot` and `qq_plot` handle post-processing. `scripts/simulate_gwas.py` generates seeded genotypes with planted causal variants for testing. regenie is run from its own conda env (passed as `regenie_bin`) because its bioconda build conflicts with current htslib.
+
 ## Tests
 
 `tests/` holds synthetic fixtures that reproduce known failure patterns for the seven skills above: known-bad inputs must fail and known-good inputs must pass. Run them from the repo root with `bash tests/run_all.sh` (needs Python with numpy, pandas and pillow; `tectonic` is optional for the LaTeX path of `doc-build-gate`).
