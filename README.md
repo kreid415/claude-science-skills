@@ -39,6 +39,17 @@ placing job data, caches, and conda environments on cluster scratch rather
 than home. Complements `remote-compute-ssh`, which covers submit and harvest
 once a target is chosen.
 
+### `rigor-review`
+
+Project-long scientific rigor review of each output (figure, table, script,
+draft). Flags issues likely to draw reviewer pushback, recommends more
+rigorous approaches backed by retrieved literature, and runs a tiered
+prior-work search (OpenAlex + arXiv + Europe PMC, LLM abstract triage,
+full-text and citation-graph escalation). Findings persist in a
+`rigor_ledger.json`/`.md` artifact across the project. `references/` holds
+pushback catalogs for ML benchmarking, computational biology, and general
+statistics (seed citations resolved against Crossref/arXiv/JMLR).
+
 ### `science-daemon-ops`
 Diagnose and maintain a self-hosted Claude Science daemon: the app process
 itself, not the science it runs. Covers crashes, self-update restarts, hangs,
