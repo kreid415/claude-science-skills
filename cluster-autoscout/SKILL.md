@@ -214,8 +214,8 @@ before committing a build to it.
 
 ```python
 # python tool — build the preamble (helper is defined by this skill)
-pre = scratch_env_preamble("/scratch/gsteino1/$USER/myproj",
-                           conda_env="/scratch/gsteino1/$USER/myproj/conda/envs/analysis")
+pre = scratch_env_preamble("/scratch/<group>/$USER/myproj",
+                           conda_env="/scratch/<group>/$USER/myproj/conda/envs/analysis")
 command = "#!/bin/bash\n#SBATCH --partition=cpu\n#SBATCH --time=12:00:00\n" + pre + "python run.py"
 ```
 

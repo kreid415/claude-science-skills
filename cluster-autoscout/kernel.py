@@ -221,8 +221,8 @@ def scratch_env_preamble(scratch_root, conda_env=None, tmp_subdir="tmp"):
     """Shell preamble that redirects envs, caches and tmp onto cluster scratch.
 
     scratch_root -- this host's per-user scratch dir, from its compute_details
-        doc (e.g. "$HOME/scr4_gsteino1/$USER" on Rockfish,
-        "/scratch/gsteino1/$USER" on DSAI). Group-scoped on most clusters, so
+        doc (e.g. "/scratch/<group>/$USER" or "$HOME/scr4_<group>/$USER",
+        depending on the site). Group-scoped on most clusters, so
         always include $USER unless compute_details says otherwise.
     conda_env -- optional absolute env path (itself under scratch) to activate.
 

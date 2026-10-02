@@ -1,6 +1,6 @@
 # claude-science-skills
 
-Personal Claude Science agent skills, one subfolder per skill.
+Agent skills for Claude Science, one subfolder per skill. They are written to be general: site-specific values (cluster names, scratch roots, accounts) are placeholders that you fill in for your own environment.
 
 Each skill is self-contained: a `SKILL.md` (YAML frontmatter with the trigger
 description, then the guidance the agent reads) plus optional `kernel.py`
@@ -87,6 +87,71 @@ and open issues; DECISION entries export to `audit/DECISIONS.md` for the
 `reproducible` audit bundle. Writes take a file lock, so concurrent agents get
 unique IDs. Cross-linked with `paper-outline` (outline changelog cites NB IDs).
 
+### `fail-loud-pipelines`
+Coding standard and gates for experiment runners, launchers, manifests and metric code, so that failures stop the run instead of becoming plausible values. `fl_lint` statically flags swallowed exceptions, first-file fallbacks (`listdir()[0]`), `set +e`/`|| true`, `parse_known_args`, numba `fastmath`, executors hardcoded in Nextflow process bodies, and zero exit after recorded failures. Runtime guards:
+- `fl_args_consumed`: config keys the runner never reads.
+- `fl_unique_outputs`: output paths that do not encode every swept parameter.
+- `fl_completion_gate`: write `.done` only when every expected output exists, is finite and has no failed rows.
+- `fl_columns`, `fl_env_guard`: exact column names; a CUDA build is still present after an environment fork.
+- `fl_mutation_check`: proves a test fails on a known-bad input.
+
+### `claim-gate`
+Inline gate to run before any message that says done, fixed or verified, reports a number, or summarizes results. It is the per-message counterpart of the `reproducible` audit:
+- `cg_readback`: read the value from the saved artifact.
+- `cg_changed`: an "edited" file must differ from its pre-edit hash.
+- `cg_reconcile`: counts must add up.
+- `cg_scope`: claims are limited to what was checked.
+- `cg_render`: numbers go into documents from a results dict; unresolved placeholders fail.
+- `cg_stale`: outputs must postdate their code and inputs.
+- `cg_contradictions`: prose numbers must match the table.
+
+The agent appends a short claim receipt to its message.
+
+### `experiment-preflight`
+Domain-agnostic go/no-go gate run before compute is spent: a launch, sweep or wave, or adoption of a new metric. 24 PF items cover:
+- pre-declared outcome;
+- split unit vs label unit, and ID integrity;
+- selection bias / winner's curse, matched arms and coverage-balanced pooling;
+- no-op baselines that really are identities;
+- n per condition;
+- metric assumptions, and implementation vs source equation;
+- benchmark confounds, pilot-based cost and walltime, and launch flags vs intended settings;
+- multiplicity;
+- inclusion filters.
+
+Writes `experiments/<id>/PREFLIGHT.md` + `preflight.json`. GO requires evidence for every applicable blocking item. Domain packs plug in through `extra_items`.
+
+### `experiment-preflight-singlecell`
+Domain pack for single-cell, spatial and perturbation omics (AnnData/scanpy/scvi-tools), loaded with `experiment-preflight`. 22 SC items with helpers:
+- donor-grouped splits and patient-ID collisions across cohorts;
+- species filtering of gene panels;
+- zero-intensity perturbations equal raw counts;
+- cell-count/QC collapse along a perturbation axis;
+- covariate keys chosen by name, not position;
+- batch conditioning vs disentanglement claims;
+- block vs per-dimension metric scoring;
+- kNN metric validity bounds;
+- foundation-model vocabulary coverage.
+
+### `standing-instructions`
+Per-project `CONSTRAINTS.md` ledger of the user's standing rules (data, method, format, writing, collaboration, process), each with its source. Rules are captured the moment they are stated or corrected. The agent checks applicable rules before every deliverable (`si_applicable`, `si_check_output`) and proposes, rather than makes, changes to an established decision. Open user questions are answered before a plan is executed (`si_open_questions`), and corrections are propagated to every file that states the old version (`si_propagate`). Mirrors `lab-notebook` DECISION entries.
+
+### `doc-build-gate`
+Builds the exact saved LaTeX/markdown/HTML deliverable and fails on:
+- unresolved artifact markers or absolute sandbox paths;
+- missing `\includegraphics` targets;
+- any LaTeX warning class (citations, references, labels, missing files, boxes, reruns);
+- images replaced by alt text, and embedded-figure counts that differ from the expected count.
+
+Figure QA (`dg_figure_qa`, `dg_overlap_check`) catches blank panels, near-duplicate figures, text/legend overlaps and text outside the canvas.
+
+### `run-status-board`
+One status artifact per long remote run, computed only from the expected manifest, the outputs actually present and valid (via `fl_completion_gate`), and scheduler accounting (`sacct`/`squeue` parsers covering array tasks, OOM, TIMEOUT and requeues). Every unit is classified as done-valid, done-invalid, running, pending, failed or missing. `rs_eta` gives a throughput-based ETA and refuses one until enough units finish. All status answers quote the board and its timestamp. Queries only explicit job ids; never account-wide commands.
+
+## Tests
+
+`tests/` holds synthetic fixtures that reproduce known failure patterns for the seven skills above: known-bad inputs must fail and known-good inputs must pass. Run them from the repo root with `bash tests/run_all.sh` (needs Python with numpy, pandas and pillow; `tectonic` is optional for the LaTeX path of `doc-build-gate`).
+
 ## Layout
 
 ```
@@ -97,6 +162,4 @@ unique IDs. Cross-linked with `paper-outline` (outline changelog cites NB IDs).
   scripts/          # optional standalone CLI tools
 ```
 
-Files are kept in sync with the locally installed skill versions. Internal
-catalog metadata (`.catalog_stamp`, `.sync-org`) is deliberately not
-versioned.
+`kernel.py` sidecars follow the Claude Science sidecar rules (functions, imports and literal constants only) and are auto-loaded when the skill is activated. Several skills call the Claude Science `host` API; outside Claude Science the pure-Python helpers (`fl_*`, `cg_*`, `pf_*`, `scpf_*`, `si_*`, `dg_*`, `rs_*`) can be imported by exec-ing `kernel.py`. Internal catalog metadata (`.catalog_stamp`, `.sync-org`, `.authorship`) is deliberately not versioned.
