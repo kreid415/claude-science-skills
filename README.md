@@ -63,6 +63,30 @@ the handoff artifact that lets a fresh session continue without losing the
 thread. Rotation is judged on task boundaries first and size second. Thresholds
 are derived from measured session data rather than convention.
 
+### `paper-outline`
+Maintain a living, citation-backed outline of the paper a project is building
+toward, kept in the project's git repo (`paper/`) and updated as the work
+changes. Laid out like a paper: main text (Abstract, Introduction with research
+questions, Methods, Results with experiments, Discussion), then References
+generated from verified BibTeX, then Supplementary material for low-level
+detail (method math, dataset specifics, experiment settings) that the main text
+points to as `[S-ID]`. The supplement may only cite works the main text cites.
+Unverified leads are flagged `(@?key)`; `evidence.md` records what each source
+shows and where it was checked; a separate `CHANGELOG.md` records every change
+and why. `kernel.py` provides init, consistency check, reference rendering,
+Crossref BibTeX fetch, and changelog-plus-commit helpers.
+
+### `lab-notebook`
+Wet-lab-style electronic lab notebook for computational projects: timestamped,
+append-only entries (EXPERIMENT, RESULT, FINDING, DECISION, ISSUE, NOTE,
+CORRECTION) on dated daily pages under `notebook/`, written as work happens.
+Entries carry a SHA-256 hash chain so edits, deletions, or reordering are
+detectable (`nb_check`); mistakes are fixed with CORRECTION entries, never by
+editing. A generated `INDEX.md` groups entries by experiment and lists decisions
+and open issues; DECISION entries export to `audit/DECISIONS.md` for the
+`reproducible` audit bundle. Writes take a file lock, so concurrent agents get
+unique IDs. Cross-linked with `paper-outline` (outline changelog cites NB IDs).
+
 ## Layout
 
 ```
