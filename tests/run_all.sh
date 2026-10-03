@@ -12,4 +12,7 @@ for n in "${!K[@]}"; do
   cp "$ROOT/tests/${n}_tests.py" "$d/t.py"
   if (cd "$d" && python t.py > out.txt 2>&1); then echo "PASS $n: $(tail -1 "$d/out.txt")"; else echo "FAIL $n"; tail -20 "$d/out.txt"; fail=1; fi
 done
+if python -c "import cairosvg, lxml, pypdf" 2>/dev/null; then
+  if python "$ROOT/tests/bio-diagram_tests.py" > /tmp/bd_out.txt 2>&1; then echo "PASS bio-diagram: $(tail -1 /tmp/bd_out.txt)"; else echo "FAIL bio-diagram"; tail -20 /tmp/bd_out.txt; fail=1; fi
+else echo "SKIP bio-diagram (needs cairosvg, lxml, pypdf)"; fi
 exit $fail
