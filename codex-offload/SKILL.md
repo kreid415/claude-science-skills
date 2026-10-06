@@ -39,6 +39,14 @@ exit $rc''',
    - 11: Codex exec failed; read `events.jsonl` / `run.json.stderr_tail`, fix the task, retry once, then fall back to Claude.
 5. Never mark the work verified from Codex's own summary. Codex output is an untrusted draft until tests/diff review pass.
 
+## Model and effort
+Correctness first: do not pass `--model` and do not lower reasoning effort to save quota. Without `--model`, Codex uses the default in `~/.codex/config.toml` on the host. Pass `--model <slug>` only when a task calls for a specific one; `codex debug models` on the host lists what the account offers. The runner has no effort flag; a higher effort for a hard task needs `-c model_reasoning_effort=...` added to the runner. Higher effort is not shown here to be more accurate, so judge it on the acceptance result.
+
+## Correctness checks
+- A task without a runnable acceptance command is not offloaded.
+- After Codex returns, run the acceptance command and read the full diff before reporting anything. A Codex summary is never evidence.
+- If acceptance fails: one correction round to Codex with the failing output, then take over in Claude. Do not report partial success.
+
 ## Gate thresholds
 `--min-5h 2 --min-week 1` (percent remaining). Raise them to keep a reserve; the stated policy is to run to exhaustion.
 
