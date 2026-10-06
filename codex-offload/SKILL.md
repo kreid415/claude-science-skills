@@ -33,14 +33,23 @@ exit $rc''',
 ```
    Then end the turn and park on the compute notification.
 4. Read the exit code:
-   - 0: Codex ran. Review `last_message.md`, `diff.patch`, and `run.json` (`used_percent_delta`) before saying anything is done; run the acceptance test yourself.
+   - 0: Codex ran. Review `last_message.md`, `diff.patch`, and `run.json` (model, effort, token totals) before saying anything is done; run the acceptance test yourself.
    - 10: gated, route to Claude. `route.json` has `reason` and `retry_at` (Unix seconds of the window reset). Do the work in Claude now; return to Codex after `retry_at`.
    - 12: Codex hit the usage limit mid-run. Treat as 10, then inspect the partial diff before reusing it.
    - 11: Codex exec failed; read `events.jsonl` / `run.json.stderr_tail`, fix the task, retry once, then fall back to Claude.
 5. Never mark the work verified from Codex's own summary. Codex output is an untrusted draft until tests/diff review pass.
 
 ## Model and effort
-Correctness first: do not pass `--model` and do not lower reasoning effort to save quota. Without `--model`, Codex uses the default in `~/.codex/config.toml` on the host. Pass `--model <slug>` only when a task calls for a specific one; `codex debug models` on the host lists what the account offers. The runner has no effort flag; a higher effort for a hard task needs `-c model_reasoning_effort=...` added to the runner. Higher effort is not shown here to be more accurate, so judge it on the acceptance result.
+Default (no flags): the Codex default in `~/.codex/config.toml` on the host, currently `gpt-6.1-sol` at `xhigh`. Correctness comes first: never switch to a cheaper model or lower effort to save quota. Pass `--model <slug>` and optionally `--effort low|medium|high|xhigh|max|ultra` (sent as `-c model_reasoning_effort=...`). `codex debug models` on the host lists what the account offers.
+
+| Task | Model |
+|---|---|
+| Most coding: refactors, multi-file edits, tests, scripts | default (`gpt-6.1-sol`) |
+| Hardest work: many steps and tools, or a wrong result is costly (large cross-module changes, subtle algorithms, a second attempt after a failed acceptance run) | `--model gpt-6-astra` (OpenAI: strongest capability across steps and tools; costs more quota) |
+| Life-science research code | `--model gpt-rosalind-5.5` only when domain knowledge matters; otherwise default |
+| Narrow, repeatable, high-volume work (extraction, summarization) | `gpt-6-luna` exists but is not used while correctness is the priority |
+
+Evidence so far: all three of Sol, Astra and Rosalind passed an independent check on one small FASTA task (token counts in `run.json` differed; Rosalind used about twice the input tokens). That is a smoke test, not a quality comparison. Compare models on a real task with an acceptance command before changing the routing, and judge by the acceptance result, not by model name or effort level. `run.json` records the model, effort and token totals for each run.
 
 ## Correctness checks
 - A task without a runnable acceptance command is not offloaded.
@@ -51,11 +60,10 @@ Correctness first: do not pass `--model` and do not lower reasoning effort to sa
 `--min-5h 2 --min-week 1` (percent remaining). Raise them to keep a reserve; the stated policy is to run to exhaustion.
 
 ## Provenance
-Each run writes `.codex-offload/<run_id>/` in the workdir: route.json, usage_before/after.json, events.jsonl (token usage), last_message.md, diff.patch, run.json (codex version, task sha256, git head, exit code, usage delta). Keep run.json with the commit.
+Each run writes `.codex-offload/<run_id>/` in the workdir: route.json, usage_before/after.json, events.jsonl (token usage), last_message.md, diff.patch, run.json (codex version, task sha256, git head, exit code, usage delta). Keep run.json with the commit. Token totals come from the `turn.completed` events; `used_percent_delta` is integer-rounded and reads 0 or 1 for small tasks.
 
 ## Known limits
 - Usage is account-wide: the Codex desktop app and any other Codex client draw from the same pool.
 - `--sandbox workspace-write` is the default; use read-only for review tasks. Avoid danger-full-access.
 - submit_job only harvests files under the job workdir, hence the cp into `out/`.
 - If the 5-hour window is empty but weekly has room, waiting for `retry_at` is cheaper than Claude only if the task is not urgent.
-- `used_percent_delta` in run.json is integer-rounded, so small tasks read 0 or 1. For per-task cost read the token counts in the `turn.completed` events of events.jsonl.
