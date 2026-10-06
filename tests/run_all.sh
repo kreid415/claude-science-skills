@@ -15,4 +15,5 @@ done
 if python -c "import cairosvg, lxml, pypdf" 2>/dev/null; then
   if python "$ROOT/tests/bio-diagram_tests.py" > /tmp/bd_out.txt 2>&1; then echo "PASS bio-diagram: $(tail -1 /tmp/bd_out.txt)"; else echo "FAIL bio-diagram"; tail -20 /tmp/bd_out.txt; fail=1; fi
 else echo "SKIP bio-diagram (needs cairosvg, lxml, pypdf)"; fi
+if python "$ROOT/tests/codex-offload_tests.py" > /tmp/co_out.txt 2>&1; then echo "PASS codex-offload: $(tail -1 /tmp/co_out.txt)"; else echo "FAIL codex-offload"; tail -20 /tmp/co_out.txt; fail=1; fi
 exit $fail
