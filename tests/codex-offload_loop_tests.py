@@ -126,9 +126,9 @@ sm = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, "codex_ledger
 check("ledger mark and summary report the escaped defect", json.loads(mk.stdout)["marked"] and sm["escaped_defects"] == 1 and sm["escaped_defect_rate"] is not None)
 # 12. canary: quick checks, manifest drift, failing usage read, full known-answer task
 cd = tempfile.mkdtemp()
-for n in ["codex_usage.py", "codex_run.py", "codex_loop.py", "codex_ledger.py", "codex_canary.py"]: shutil.copy(os.path.join(ROOT, n), os.path.join(cd, n))
+for n in ["codex_usage.py", "codex_run.py", "codex_loop.py", "codex_ledger.py", "codex_canary.py", "codex_mutate.py"]: shutil.copy(os.path.join(ROOT, n), os.path.join(cd, n))
 def write_manifest():
-    open(os.path.join(cd, "MANIFEST.sha256"), "w").write("".join(f"{hashlib.sha256(open(os.path.join(cd, n), 'rb').read()).hexdigest()}  {n}\n" for n in ["codex_usage.py", "codex_run.py", "codex_loop.py", "codex_ledger.py", "codex_canary.py"]))
+    open(os.path.join(cd, "MANIFEST.sha256"), "w").write("".join(f"{hashlib.sha256(open(os.path.join(cd, n), 'rb').read()).hexdigest()}  {n}\n" for n in ["codex_usage.py", "codex_run.py", "codex_loop.py", "codex_ledger.py", "codex_canary.py", "codex_mutate.py"]))
 write_manifest()
 cenv = dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"], STUB_PLAN=os.path.join(d, "plan.json"), STUB_LOG=LOG, CODEX_LEDGER=LEDGER)
 def canary(*args, env=None):
@@ -174,6 +174,51 @@ ff = os.path.join(d, "failfirst.flag")
 if os.path.exists(ff): os.remove(ff)
 r = subprocess.run([sys.executable, os.path.join(ROOT, "codex_usage.py"), "--line"], env=dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"], STUB_FAIL_FIRST=ff, CODEX_USAGE_TIMEOUT="2"), capture_output=True, text=True, timeout=120)
 check("usage read recovers from one timed-out request by retrying", r.stdout.startswith("Codex remaining: 5h 90%") and os.path.exists(ff))
+# 15. tests-only mode: mutation testing, known bugs, protected sources
+CALC2 = "def add(a, b):\n    return a + b\n\ndef sign(x):\n    if x > 0:\n        return 1\n    if x < 0:\n        return -1\n    return 0\n"
+HEAD = "import sys, os\nsys.path.insert(0, os.getcwd())\nfrom calc import add, sign\n"
+T_WEAK = HEAD + "assert True\n"
+T_STRONG = HEAD + "assert add(2, 3) == 5 and add(-1, 1) == 0 and add(1, -1) == 0 and add(0, 0) == 0\nassert sign(5) == 1 and sign(1) == 1 and sign(-5) == -1 and sign(-1) == -1 and sign(0) == 0\n"
+T_FAILING = HEAD + "assert add(2, 3) == 6\n"
+BUGP = os.path.join(d, "bug.patch")
+open(BUGP, "w").write("--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a + b\n+    return abs(a) + b\n")
+def tproject():
+    w = project(CALC2); return w
+def loop_t(w, plan, *extra):
+    pf = os.path.join(d, "plan.json"); json.dump(plan, open(pf, "w"))
+    env = dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"], STUB_PLAN=pf, STUB_LOG=LOG, CODEX_LEDGER=LEDGER)
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "codex_loop.py"), os.path.join(w, "task.md"), w, "--tests-only", "--tests-cmd", f"{sys.executable} tests/test_new.py",
+                        "--mutation-target", "calc.py", *extra], env=env, capture_output=True, text=True, timeout=600)
+    lj = [x for x in os.listdir(os.path.join(w, ".codex-offload")) if x.startswith("loop_")]
+    return r.returncode, (json.load(open(os.path.join(w, ".codex-offload", lj[0], "loop.json"))) if lj else {}), r.stdout
+w = tproject(); rc, log, _ = loop_t(w, {"default": [["tests/test_new.py", T_WEAK]], "gpt-6-astra:xhigh": [["tests/test_new.py", T_STRONG]]})
+a1 = log["attempts"][0]
+check("vacuous tests for existing code: mutation score 0, rejected", a1["verdict"] == "failed" and a1["mutation"][0]["score"] == 0.0 and any("mutation score" in x for x in a1["reasons"]))
+check("surviving changes are fed to the next rung", "did not detect" in open(os.path.join(log["root"], "task_2.md")).read())
+check("strong tests accepted on the second rung, confirmed on two different mutant samples", rc == 0 and log["final"]["attempt"] == 2 and [m["seed"] for m in log["attempts"][1]["mutation"]] == [2, 1002])
+check("accepted result lists survivors review and only adds test files", "mutation score" in " ".join(log["final"]["needs_review"]) and open(log["final"]["patch"]).read().count("diff -ruN") == 1)
+w = tproject(); rc, log, _ = loop_t(w, {"default": [["tests/test_new.py", T_STRONG], ["calc.py", CALC2 + "\n# touched\n"]], "gpt-6-astra:xhigh": [["tests/test_new.py", T_STRONG]]})
+check("tests-only: editing the code under test is rejected even with strong tests", log["attempts"][0]["verdict"] == "failed" and "calc.py" in log["attempts"][0]["protect_violations"] and rc == 0 and log["final"]["attempt"] == 2)
+w = tproject(); rc, log, _ = loop_t(w, {"default": [["tests/test_new.py", T_WEAK]], "gpt-6-astra:xhigh": [["tests/test_new.py", T_STRONG]]}, "--mutation-min", "0", "--bug-patch", BUGP)
+check("tests that miss a known real bug are rejected", any("do NOT catch known bug" in x for x in log["attempts"][0]["reasons"]) and rc == 0 and log["attempts"][1]["bug_checks"][0]["tests_rc"] != 0)
+w = tproject(); rc, log, _ = loop_t(w, {"default": [["tests/test_new.py", T_FAILING]], "gpt-6-astra:xhigh": [["tests/test_new.py", T_FAILING]], "gpt-6-astra:max": [["tests/test_new.py", T_FAILING]]})
+check("tests that fail on the current code never pass; exit 30", rc == 30 and all("fail on the current code" in " ".join(x["reasons"]) for x in log["attempts"]))
+w = tproject(); rc, log, _ = loop_t(w, {"default": [["notes.txt", "x"]], "gpt-6-astra:xhigh": [["notes.txt", "x"]], "gpt-6-astra:max": [["notes.txt", "x"]]})
+check("no new test files -> rejected", rc == 30 and any("no new test files" in x for x in log["attempts"][0]["reasons"]))
+w = tproject(); pf = os.path.join(d, "plan.json"); json.dump({}, open(pf, "w"))
+r = subprocess.run([sys.executable, os.path.join(ROOT, "codex_loop.py"), os.path.join(w, "task.md"), w, "--tests-only"], env=dict(os.environ, STUB_PLAN=pf, STUB_LOG=LOG, CODEX_LEDGER=LEDGER), capture_output=True, text=True)
+check("tests-only without --tests-cmd and a target is refused (exit 2)", r.returncode == 2)
+# 16. codex_mutate.py directly
+import importlib.util as _iu
+_sp = _iu.spec_from_file_location("codex_mutate", os.path.join(ROOT, "codex_mutate.py")); cm = _iu.module_from_spec(_sp); _sp.loader.exec_module(cm)
+w = tproject(); open(os.path.join(w, "tests", "test_new.py"), "w").write(T_STRONG)
+r1 = cm.mutate(w, ["calc.py"], f"{sys.executable} tests/test_new.py", 60, 60, 0)
+open(os.path.join(w, "tests", "test_new.py"), "w").write(T_WEAK); r2 = cm.mutate(w, ["calc.py"], f"{sys.executable} tests/test_new.py", 60, 60, 0)
+check("mutation testing: strong tests kill every mutant, vacuous tests kill none", r1["status"] == "ok" and r1["score"] == 1.0 and r2["score"] == 0.0 and r1["run"] >= 8)
+open(os.path.join(w, "tests", "test_new.py"), "w").write(T_FAILING); r3 = cm.mutate(w, ["calc.py"], f"{sys.executable} tests/test_new.py", 60, 60, 0)
+check("mutation testing refuses a red baseline", r3["status"] == "baseline_red")
+open(os.path.join(w, "empty.py"), "w").write("X = 'a'\n"); open(os.path.join(w, "tests", "test_new.py"), "w").write(T_STRONG)
+check("mutation testing reports when there is nothing to mutate", cm.mutate(w, ["empty.py"], f"{sys.executable} tests/test_new.py", 60, 60, 0)["status"] == "nothing_to_mutate")
 try: os.remove(os.path.join(ROOT, ".loop.lock"))
 except OSError: pass
 print(f"{len(fails)} failed" if fails else "all codex-offload loop tests passed")

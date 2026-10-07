@@ -7,7 +7,7 @@ State: <this dir>/canary_state.json. Canary loops are logged to canary_ledger.js
 import argparse, hashlib, json, os, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = ["codex_usage.py", "codex_run.py", "codex_loop.py", "codex_ledger.py", "codex_canary.py"]
+SCRIPTS = ["codex_usage.py", "codex_run.py", "codex_loop.py", "codex_ledger.py", "codex_canary.py", "codex_mutate.py"]
 TASK = ("Implement `slugify(s)` in slug.py. Rules: lowercase; remove accents (decompose with unicodedata NFKD and drop combining marks); "
         "replace every run of characters that are not ASCII letters or digits with a single hyphen; strip leading and trailing hyphens; the empty string maps to the empty string.")
 ACCEPT = ("import os,sys\nsys.path.insert(0, os.environ['ACCEPT_WORKDIR'])\nfrom slug import slugify\n"

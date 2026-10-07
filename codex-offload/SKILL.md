@@ -10,7 +10,7 @@ Policy: use Codex until it runs out, then switch to Claude. Codex credits are us
 ## Setup
 - `<HOST_TARGET>`: an SSH compute target registered in Claude Science that points at the machine running the daemon (sshd on, key-based login to itself). Replace the placeholder with its name.
 - Codex CLI installed on that host and logged in with ChatGPT (`codex login`, or `codex login --device-auth` on a headless box). The login stays on the host, outside the sandbox.
-- Copy the five scripts in `scripts/` (`codex_usage.py`, `codex_run.py`, `codex_loop.py`, `codex_ledger.py`, `codex_canary.py`) to `~/codex-offload/` on the host (call_command + base64 works; keep them in one directory) and write the manifest there: `cd ~/codex-offload && sha256sum codex_usage.py codex_run.py codex_loop.py codex_ledger.py codex_canary.py > MANIFEST.sha256`. Redo this after every script change; the canary compares against it.
+- Copy the six scripts in `scripts/` (`codex_usage.py`, `codex_run.py`, `codex_loop.py`, `codex_ledger.py`, `codex_canary.py`, `codex_mutate.py`) to `~/codex-offload/` on the host (call_command + base64 works; keep them in one directory) and write the manifest there: `cd ~/codex-offload && sha256sum codex_usage.py codex_run.py codex_loop.py codex_ledger.py codex_canary.py codex_mutate.py > MANIFEST.sha256`. Redo this after every script change; the canary compares against it.
 - `codex_usage.py` starts `codex app-server` and calls the JSON-RPC method `account/rateLimits/read`. Windows are labelled by `windowDurationMins` (300 -> 5h, 10080 -> weekly), never by primary/secondary. Written against Codex CLI 0.159.x; the app-server schema changes between versions, so re-run it after upgrades.
 - `codex_run.py` is one gated `codex exec` attempt with provenance. `codex_loop.py` wraps it with the guards and the escalation ladder; use the loop for every offloaded task. `codex_ledger.py` logs every loop; `codex_canary.py` checks that the path works.
 
@@ -18,7 +18,7 @@ Policy: use Codex until it runs out, then switch to Claude. Codex credits are us
 Run `python3 ~/codex-offload/codex_canary.py --auto` on the host (call_command, login shell). It checks that Codex is installed and logged in, the usage read returns windows, and the scripts match the manifest; it also runs one known-answer task through the whole loop when the Codex version changed or the last full pass is over 7 days old. If it exits 1, do NOT offload: tell the user which check failed, plainly, and do the task in Claude. A silent fallback would hide a dead offload path.
 
 ## Automatic use
-Offload without being asked when ALL hold: (1) code or text editing work, roughly >10 Claude tool turns or >200 changed lines; (2) the spec fits one task file and you can write an acceptance command for it (see below); (3) no need for host.*, the kernel, MCP connectors or other Claude skills; (4) no credentials/secrets and no hazardous-bio material in the task; (5) the repo is under ~500 MB (the loop works on copies). Otherwise do it in Claude; tiny edits always stay in Claude. State in one line that you are offloading and why. Each submit raises an approval card unless the user has set Always-Allow for the host target.
+Offload without being asked when ALL hold: (1) code or text editing work, roughly >10 Claude tool turns or >200 changed lines; (2) the spec fits one task file and you can write an acceptance command for it (see below), or it is a tests-for-existing-code task with a `--tests-only` configuration; (3) no need for host.*, the kernel, MCP connectors or other Claude skills; (4) no credentials/secrets and no hazardous-bio material in the task; (5) the repo is under ~500 MB (the loop works on copies). Otherwise do it in Claude; tiny edits always stay in Claude. State in one line that you are offloading and why. Each submit raises an approval card unless the user has set Always-Allow for the host target.
 
 ## Write the acceptance check first
 Claude writes it, never Codex. A model grading its own tests can pass erroneously.
@@ -49,6 +49,19 @@ exit $rc''',
   run_timeout_s=3 * 3000 + 900)   # up to three attempts
 ```
 Add `--new-tests-cmd`, `--protect`, `--accept-before pass` or `--ladder` as needed. End the turn and park on the compute notification.
+
+## Tests for existing code (`--tests-only`)
+For "write tests for this module" there is no failing baseline, so the acceptance check cannot be red first. The loop uses different guards:
+```
+python3 ~/codex-offload/codex_loop.py task.md <ABS_REPO> --tests-only --tests-cmd "python3 tests/test_x.py" \
+  --mutation-target pkg/mod.py [--mutation-target ...] [--bug-patch $PWD/acc/bug1.patch ...] [--mutation-min 0.75]
+```
+- `--tests-cmd` runs the whole suite including the new tests (exit 0 = pass); `--mutation-target` names the Python source files the tests are for.
+- Every pre-existing file must stay unchanged (tests only), at least one new test file must appear, and the tests must pass on the current code.
+- Each `--bug-patch` (a `patch -p1` file you write: a realistic bug in the code under test) must make the new tests FAIL. Write two or three; they are the part the model cannot see or tune to.
+- `codex_mutate.py` (stdlib, Python only) changes the target code one step at a time (flipped comparisons, swapped operators, changed constants, negated conditions, return value to None) and counts how many the tests catch. The score must reach `--mutation-min` (default 0.75) on two different random samples. Survivors from the first sample go into the next attempt's feedback; the second sample is fresh, so listing them does not let the model tune to them.
+- Survivors can be equivalent mutants (changes that do not alter behavior, such as counts that all shift by the same amount). The accepted result lists them in `needs_review`: read them, and lower `--mutation-min` only after judging that the survivors are equivalent. Other languages need a different mutation tool; none is built.
+- A thorough-looking suite proves nothing by itself; this is real evidence of strength: it failed on every known bug and on 44 of 46 changed versions of the code. Still read the tests: check they assert exact values and are not brittle (for example, control-character inputs or checks on exact error messages).
 
 ## Escalation ladder
 Default `--ladder default,gpt-6-astra:xhigh,gpt-6-astra:max`. Rung 1 is the host default (currently `gpt-6.1-sol` at `xhigh`). When an attempt fails (acceptance fails, a protected file changed, vacuous or unverified tests, exec error), the next rung starts from a fresh baseline copy and its task text includes the failure reasons and the acceptance output tail. Astra is OpenAI's strongest-capability option for multi-step, multi-tool work and costs more quota. Higher effort is not shown to be more accurate; the evidence for any rung is its acceptance result. If a rung's model or effort is not available to the account, the exec fails and the loop moves on. Override with `--ladder default` (single attempt) or a different list; never lower model or effort to save quota. Rung syntax: `default`, `MODEL`, `MODEL:EFFORT`.
