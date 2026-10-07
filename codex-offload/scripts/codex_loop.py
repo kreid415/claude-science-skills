@@ -13,7 +13,8 @@ Guards (each is checked by code, not by the model):
 Escalation ladder (--ladder, default 'default,gpt-6-astra:xhigh,gpt-6-astra:max'): rung = 'default' | MODEL | MODEL:EFFORT.
 A failed attempt feeds its reasons and acceptance output into the next attempt (fresh baseline copy each time).
   4. --bad-variant PATCH (repeatable, `patch -p1` format): known-wrong implementations the acceptance must REJECT.
-One loop at a time (lock file next to this script). Each loop appends an entry to the ledger (codex_ledger.py).
+One loop at a time (lock file next to this script). Each loop appends an entry to the ledger (codex_ledger.py) and ends by reading the remaining 5h, weekly and credit amounts
+(final.usage_report.report_line in loop.json, also printed) so they can be reported to the user.
 Exit: 0 accepted | 10 gated before/between attempts | 12 usage limit hit | 20 acceptance invalid (passes baseline or a bad variant) |
       2 bad input | 30 all attempts failed (Claude takes over) | 40 another loop is running."""
 import argparse, fcntl, fnmatch, hashlib, json, os, shutil, subprocess, sys, time, datetime
@@ -199,6 +200,17 @@ def main():
     holder = {}
     rc = _main(holder)
     if "log" in holder:
+        log = holder["log"]
+        try:
+            sys.path.insert(0, HERE); import codex_usage
+            try: u = codex_usage.read()
+            except Exception as e: u = {"error": f"{type(e).__name__}: {e}"}
+            rep = {"report_line": codex_usage.format_line(u), "usage": u}
+            log["final"] = dict(log.get("final") or {}, usage_report=rep)
+            open(os.path.join(log["root"], "loop.json"), "w").write(json.dumps(log, indent=1))
+            print(json.dumps({"usage_report": rep["report_line"]}))
+        except Exception as e:
+            print(json.dumps({"usage_report_error": f"{type(e).__name__}: {e}"}))
         try:
             sys.path.insert(0, HERE); import codex_ledger
             codex_ledger.append(_ledger_entry(holder["log"], rc))

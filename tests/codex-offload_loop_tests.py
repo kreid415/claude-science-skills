@@ -17,7 +17,11 @@ if a[:1] == ["app-server"]:
         m = json.loads(line)
         if m.get("method") == "initialize": print(json.dumps({"id": m["id"], "result": {}}), flush=True)
         elif m.get("method") == "account/rateLimits/read":
+            ff = os.environ.get("STUB_FAIL_FIRST")
+            if ff and not os.path.exists(ff):
+                open(ff, "w").write("x"); import time; time.sleep(30); sys.exit(0)
             snap = {"primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 4102444800}, "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": 4102444800}}
+            if os.environ.get("STUB_CREDITS"): snap["credits"] = {"hasCredits": True, "unlimited": False, "balance": os.environ["STUB_CREDITS"]}
             print(json.dumps({"id": m["id"], "result": {"ordinaryUsageAllowed": True, "rateLimits": snap}}), flush=True)
     sys.exit(0)
 if a[:1] == ["exec"]:
@@ -149,6 +153,27 @@ st["codex_version"] = "codex-cli older"; json.dump(st, open(os.path.join(cd, "ca
 rc, out = canary("--auto")
 check("auto runs the full task after a Codex version change", rc == 0 and out["version_changed"] and out.get("full_ran"))
 check("canary runs are kept out of the task ledger", not any(json.loads(l).get("workdir", "").find("canary_") >= 0 for l in open(LEDGER) if l.strip()) and os.path.exists(os.path.join(cd, "canary_ledger.jsonl")))
+# 13. after Codex use, the remaining 5h, weekly and credit amounts are reported (also when gated or failed)
+os.environ["STUB_CREDITS"] = "123.5"
+w = project(); rc, log = loop(w, {"default": [["calc.py", GOOD]]})
+line = log["final"]["usage_report"]["report_line"]
+check("report line has 5h, weekly and credits after an accepted run", rc == 0 and "5h 90%" in line and "weekly 80%" in line and "credits 123.5" in line)
+w = project(); rc, log = loop(w, {"default": [["calc.py", GOOD]]}, "--min-5h", "95")
+check("window below floor but credits available -> runs on credits (no credit gate)", rc == 0 and log["attempts"][0]["run_rc"] == 0)
+del os.environ["STUB_CREDITS"]
+w = project(); rc, log = loop(w, {}, "--min-5h", "95")
+check("report line is also produced when the run is gated", rc == 10 and "weekly 80%" in log["final"]["usage_report"]["report_line"] and "credits none" in log["final"]["usage_report"]["report_line"])
+os.environ["STUB_CREDITS"] = "123.5"
+w = project(); rc, log = loop(w, {})
+check("report line is produced when every attempt fails", rc == 30 and "credits 123.5" in log["final"]["usage_report"]["report_line"])
+ul = subprocess.run([sys.executable, os.path.join(ROOT, "codex_usage.py"), "--line"], env=dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"]), capture_output=True, text=True).stdout.strip()
+check("codex_usage.py --line prints the one-line report", ul.startswith("Codex remaining: 5h 90%") and "credits 123.5" in ul)
+del os.environ["STUB_CREDITS"]
+# 14. a transient timeout of the usage request is retried
+ff = os.path.join(d, "failfirst.flag")
+if os.path.exists(ff): os.remove(ff)
+r = subprocess.run([sys.executable, os.path.join(ROOT, "codex_usage.py"), "--line"], env=dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"], STUB_FAIL_FIRST=ff, CODEX_USAGE_TIMEOUT="2"), capture_output=True, text=True, timeout=120)
+check("usage read recovers from one timed-out request by retrying", r.stdout.startswith("Codex remaining: 5h 90%") and os.path.exists(ff))
 try: os.remove(os.path.join(ROOT, ".loop.lock"))
 except OSError: pass
 print(f"{len(fails)} failed" if fails else "all codex-offload loop tests passed")

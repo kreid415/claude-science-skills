@@ -70,6 +70,9 @@ Default `--ladder default,gpt-6-astra:xhigh,gpt-6-astra:max`. Rung 1 is the host
 - 2: bad input (missing workdir, repo too large, a `--bad-variant` patch that does not apply).
 - 40: another loop is running (one at a time; the usage pool and host are shared). Wait for it or do the task in Claude.
 
+## Report remaining usage after every offload
+Whenever Codex was used (accepted, failed, gated or all rungs failed), finish the message to the user with the remaining 5-hour, weekly and credit amounts. `codex_loop.py` reads them after the loop and stores the line in `loop.json` as `final.usage_report.report_line`, for example `Codex remaining: 5h 94% (resets in 3h 8m), weekly 87% (resets in 5d 0h), credits 4600.15`; copy it verbatim. If the read failed the line says `USAGE READ FAILED`; say that plainly instead of omitting it. `python3 ~/codex-offload/codex_usage.py --line` prints the same line on demand.
+
 ## Ledger
 Every loop appends one entry to `~/codex-offload/ledger.jsonl` (status, rung, attempts, tokens, credit delta, windows before and after). `codex_ledger.py summary` gives pass rates by rung, token and credit totals and the escaped-defect rate (accepted tasks later marked `--defect`). Use it to decide whether Astra or higher effort pays off and whether the acceptance checks catch errors; do not change routing without it.
 
