@@ -79,5 +79,14 @@ check("run.json records model and effort", rj["model"] == "gpt-x" and rj["effort
 wk2 = os.path.join(wd, "work2")
 r = subprocess.run([sys.executable, os.path.join(ROOT, "codex_run.py"), task, wk2, "--min-5h", "95"], env=env, capture_output=True, text=True, timeout=120)
 check("runner gates (exit 10) when 5h remaining 90% < floor 95%", r.returncode == 10 and not os.path.exists(os.path.join(wk2, "argv.json")))
+
+# 4. credits are used freely: no balance threshold, never a reason to route away while credits exist
+def UC(five, week, allowed=True, credits=None):
+    u = U(five, week, allowed); u["credits"] = credits; return u
+check("window exhausted + credits -> codex on credits", cr.decide(UC(0, 0, credits={"hasCredits": True, "unlimited": False, "balance": "4600.1"}), 2, 1)["route"] == "codex")
+check("tiny credit balance is still used (no credit gate)", cr.decide(UC(0, 0, False, {"hasCredits": True, "unlimited": False, "balance": "0.5"}), 2, 1)["on_credits"] is True)
+check("unlimited credits -> codex", cr.decide(UC(0, 0, False, {"hasCredits": False, "unlimited": True, "balance": None}), 2, 1)["route"] == "codex")
+check("exhausted and no credits -> claude with reset time", cr.decide(UC(0, 50, credits={"hasCredits": False, "unlimited": False, "balance": "0"}), 2, 1)["route"] == "claude")
+check("ordinary usage blocked and no credits -> claude", cr.decide(UC(50, 50, False, None), 2, 1)["route"] == "claude")
 print(f"{len(fails)} failed" if fails else "all codex-offload tests passed")
 sys.exit(1 if fails else 0)

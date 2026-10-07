@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+codex-offload/scripts/.loop.lock
+codex-offload/scripts/ledger.jsonl
+codex-offload/scripts/canary_state.json
+codex-offload/scripts/MANIFEST.sha256

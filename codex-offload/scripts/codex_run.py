@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """codex_run.py TASK.md WORKDIR [--sandbox workspace-write] [--min-5h 2] [--min-week 1] [--timeout 3600] [--model M] [--effort low|medium|high|xhigh|max|ultra]
-Gate on Codex plan usage, run `codex exec`, record provenance. Policy: use Codex until a window is exhausted, then hand back to Claude.
+Gate on Codex plan usage, run `codex exec`, record provenance. Policy: use Codex until included windows and credits are exhausted, then hand back to Claude.
 Exit codes: 0 ran ok | 10 gated -> route to CLAUDE (see route.json) | 11 exec failed | 12 exec hit usage limit mid-run -> route CLAUDE.
 Outputs in WORKDIR/.codex-offload/<run_id>/: route.json, usage_before.json, usage_after.json, events.jsonl, last_message.md, diff.patch, run.json"""
 import argparse, hashlib, json, os, subprocess, sys, time, datetime, importlib.util
@@ -12,17 +12,37 @@ def read_usage():
     try: return json.loads(r.stdout)
     except ValueError: return {"error": "unparseable usage output", "raw": r.stdout[-300:]}
 
+def credits_ok(u):
+    """Credits are used freely (user decision): usable if Codex reports unlimited credits or a credit balance. No balance threshold."""
+    c = u.get("credits") or {}
+    try: bal = float(c.get("balance"))
+    except (TypeError, ValueError): bal = None
+    return bool(c.get("unlimited") or c.get("hasCredits")), bal
+
 def decide(u, min5, minw):
-    if "error" in u: return {"route": "claude", "reason": "usage read failed: " + str(u["error"])[:200], "retry_at": None}
-    if u.get("ordinary_usage_allowed") is False:
-        return {"route": "claude", "reason": "ordinary_usage_allowed=false", "retry_at": None}
+    """Policy: use Codex until it runs out. Included windows first; when they are exhausted and the account has credits,
+    keep going on credits with no gate on the balance; route to Claude only when neither is available.
+    If Codex itself refuses mid-run the run exits 12 and the task goes to Claude."""
+    if "error" in u: return {"route": "claude", "reason": "usage read failed: " + str(u["error"])[:200], "retry_at": None, "on_credits": False}
+    has_credit, bal = credits_ok(u)
     by = {w["label"]: w for w in u["windows"]}
-    # weekly exhaustion blocks until the weekly reset; 5h exhaustion blocks until the 5h reset
-    for lab, floor in (("weekly", minw), ("5h", min5)):
-        w = by.get(lab)
-        if w and w["remaining_percent"] is not None and w["remaining_percent"] < floor:
-            return {"route": "claude", "reason": f"{lab} window has {w['remaining_percent']}% left (< {floor}%)", "retry_at": w["resets_at"]}
-    return {"route": "codex", "reason": "headroom: " + ", ".join(f"{w['label']} {w['remaining_percent']}% left" for w in u["windows"]), "retry_at": None}
+    low = [(lab, by[lab]) for lab, floor in (("weekly", minw), ("5h", min5)) if by.get(lab) and by[lab]["remaining_percent"] is not None and by[lab]["remaining_percent"] < floor]
+    blocked = u.get("ordinary_usage_allowed") is False
+    if low or blocked:
+        if has_credit:
+            why = "included usage exhausted" if blocked else "window below floor (" + ", ".join(f"{l} {w['remaining_percent']}%" for l, w in low) + ")"
+            return {"route": "codex", "reason": f"{why}; running on credits (balance {bal})", "retry_at": None, "on_credits": True, "credit_balance": bal}
+        if blocked: return {"route": "claude", "reason": "ordinary_usage_allowed=false and the account has no credits", "retry_at": None, "on_credits": False}
+        lab, w = low[0]
+        return {"route": "claude", "reason": f"{lab} window has {w['remaining_percent']}% left and the account has no credits", "retry_at": w["resets_at"], "on_credits": False}
+    return {"route": "codex", "reason": "headroom: " + ", ".join(f"{w['label']} {w['remaining_percent']}% left" for w in u["windows"]), "retry_at": None, "on_credits": False}
+
+def credit_delta(u0, u1):
+    def bal(u):
+        try: return float((u.get("credits") or {}).get("balance"))
+        except (TypeError, ValueError): return None
+    b0, b1 = bal(u0), bal(u1)
+    return {"balance_before": b0, "balance_after": b1, "delta": None if b0 is None or b1 is None else round(b1 - b0, 6)}
 
 def sh(cmd, cwd=None):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True); return r.stdout
@@ -76,7 +96,7 @@ def main():
     ver = sh(["codex", "--version"]).strip()
     rec = {"run_id": run_id, "codex_version": ver, "cmd": cmd, "task_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
            "workdir": wd, "git_head_before": head0, "exit_code": rc, "seconds": round(t1 - t0, 1), "used_percent_delta": delta,
-           "hit_usage_limit": hit, "model": a.model or "(host default)", "effort": a.effort or "(host default)", "tokens": tok, "stderr_tail": err}
+           "hit_usage_limit": hit, "on_credits": d.get("on_credits"), "credits": credit_delta(u0, u1), "model": a.model or "(host default)", "effort": a.effort or "(host default)", "tokens": tok, "stderr_tail": err}
     wj("run.json", rec)
     print(json.dumps({k: rec[k] for k in ("run_id", "exit_code", "seconds", "used_percent_delta", "hit_usage_limit", "model", "tokens")}))
     return 12 if hit else (0 if rc == 0 else 11)

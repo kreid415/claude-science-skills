@@ -5,14 +5,17 @@ description: "Offload well-specified work (refactors, scripts, tests, bulk edits
 
 # codex-offload
 
-Policy: use Codex until its quota runs out, then switch to Claude. Correctness comes before speed and quota: a result counts only if an independent check that the model did not write passes.
+Policy: use Codex until it runs out, then switch to Claude. Codex credits are used freely (user decision): there is no gate or stop on the credit balance; it is only recorded. Correctness comes before speed and quota: a result counts only if an independent check that the model did not write passes.
 
 ## Setup
 - `<HOST_TARGET>`: an SSH compute target registered in Claude Science that points at the machine running the daemon (sshd on, key-based login to itself). Replace the placeholder with its name.
 - Codex CLI installed on that host and logged in with ChatGPT (`codex login`, or `codex login --device-auth` on a headless box). The login stays on the host, outside the sandbox.
-- Copy `scripts/codex_usage.py`, `scripts/codex_run.py` and `scripts/codex_loop.py` to `~/codex-offload/` on the host (call_command + base64 works; keep them in one directory).
+- Copy the five scripts in `scripts/` (`codex_usage.py`, `codex_run.py`, `codex_loop.py`, `codex_ledger.py`, `codex_canary.py`) to `~/codex-offload/` on the host (call_command + base64 works; keep them in one directory) and write the manifest there: `cd ~/codex-offload && sha256sum codex_usage.py codex_run.py codex_loop.py codex_ledger.py codex_canary.py > MANIFEST.sha256`. Redo this after every script change; the canary compares against it.
 - `codex_usage.py` starts `codex app-server` and calls the JSON-RPC method `account/rateLimits/read`. Windows are labelled by `windowDurationMins` (300 -> 5h, 10080 -> weekly), never by primary/secondary. Written against Codex CLI 0.159.x; the app-server schema changes between versions, so re-run it after upgrades.
-- `codex_run.py` is one gated `codex exec` attempt with provenance. `codex_loop.py` wraps it with the guards and the escalation ladder; use the loop for every offloaded task.
+- `codex_run.py` is one gated `codex exec` attempt with provenance. `codex_loop.py` wraps it with the guards and the escalation ladder; use the loop for every offloaded task. `codex_ledger.py` logs every loop; `codex_canary.py` checks that the path works.
+
+## Before the first offload in a session
+Run `python3 ~/codex-offload/codex_canary.py --auto` on the host (call_command, login shell). It checks that Codex is installed and logged in, the usage read returns windows, and the scripts match the manifest; it also runs one known-answer task through the whole loop when the Codex version changed or the last full pass is over 7 days old. If it exits 1, do NOT offload: tell the user which check failed, plainly, and do the task in Claude. A silent fallback would hide a dead offload path.
 
 ## Automatic use
 Offload without being asked when ALL hold: (1) code or text editing work, roughly >10 Claude tool turns or >200 changed lines; (2) the spec fits one task file and you can write an acceptance command for it (see below); (3) no need for host.*, the kernel, MCP connectors or other Claude skills; (4) no credentials/secrets and no hazardous-bio material in the task; (5) the repo is under ~500 MB (the loop works on copies). Otherwise do it in Claude; tiny edits always stay in Claude. State in one line that you are offloading and why. Each submit raises an approval card unless the user has set Always-Allow for the host target.
@@ -22,7 +25,8 @@ Claude writes it, never Codex. A model grading its own tests can pass erroneousl
 1. A command that exits 0 only when the task is done, run with `ACCEPT_WORKDIR=<tree>` set. Put its files OUTSIDE the repo (a separate `acc/` directory) and pass them with `--accept-file` so the loop hashes them before and after.
 2. It must FAIL on the untouched repo. The loop runs it on the baseline first and stops with exit 20 (no Codex quota spent) if it already passes. For behavior-preserving refactors use `--accept-before pass`; the guard is then the protected existing tests.
 3. Cover cases beyond the examples in the task text: edge values, error paths, unusual inputs. State the rules in the task, but keep the exact cases out of it.
-4. If the task is "write tests", the acceptance is still an independent Claude-written check of the implementation, plus `--new-tests-cmd "<command that runs only the new tests>"`.
+4. Write one or two known-bad implementations as `patch -p1` files and pass them with `--bad-variant`; the acceptance must reject each (exit 20 otherwise). Checklist before offloading: deterministic; fails on the baseline; rejects the bad variants; covers edge values, error paths and an unusual input; does not depend on anything the model can edit; does not reuse the task's examples verbatim.
+5. If the task is "write tests", the acceptance is still an independent Claude-written check of the implementation, plus `--new-tests-cmd "<command that runs only the new tests>"`.
 
 ## Guards (enforced by `codex_loop.py`)
 - Every attempt runs in a fresh copy of the pristine baseline. The real repo is never edited; an accepted result is written as `final.patch`.
@@ -58,12 +62,16 @@ Default `--ladder default,gpt-6-astra:xhigh,gpt-6-astra:max`. Rung 1 is the host
 `codex debug models` on the host lists what the account offers. Narrow high-volume models such as `gpt-6-luna` exist but are not used while correctness is the priority.
 
 ## Exit codes and what to do
-- 0: accepted. Read `final.patch` completely and the `needs_review` list (model-written tests: read them). Apply with `patch -p1` from the repo root (try `--dry-run` first), re-run the acceptance command on the real repo yourself, then report that Codex did the work with the rung used and token totals from the attempt `run.json`.
-- 10: gated (a usage window is below the floor). Do the task in Claude; return to Codex after `retry_at` in `route.json` of the attempt.
-- 12: Codex hit its usage limit mid-run. Do the task in Claude.
+- 0: accepted. Read `final.patch` completely and the `needs_review` list (model-written tests: read them). Apply with `patch -p1` from the repo root (try `--dry-run` first), re-run the acceptance command on the real repo yourself, then record the outcome with `python3 ~/codex-offload/codex_ledger.py mark <id> --clean` (or `--defect --note ...` as soon as a defect is found, even weeks later), and report that Codex did the work with the rung used, token totals and any credit use from the attempt `run.json`.
+- 10: gated: a window is below the floor (2% for 5h, 1% for weekly) or ordinary usage is off, AND the account reports no credits. Do the task in Claude; return to Codex after `retry_at` in `route.json` of the attempt. With credits available the run proceeds on credits.
+- 12: Codex itself refused (usage limit) mid-run. Do the task in Claude.
 - 20: acceptance did not fail on the baseline. Fix the acceptance (your job), not the model.
 - 30: every rung failed. Claude takes over. Read `loop.json` for the reasons; do not reuse or report partial results.
-- 2: bad input (missing workdir, repo too large).
+- 2: bad input (missing workdir, repo too large, a `--bad-variant` patch that does not apply).
+- 40: another loop is running (one at a time; the usage pool and host are shared). Wait for it or do the task in Claude.
+
+## Ledger
+Every loop appends one entry to `~/codex-offload/ledger.jsonl` (status, rung, attempts, tokens, credit delta, windows before and after). `codex_ledger.py summary` gives pass rates by rung, token and credit totals and the escaped-defect rate (accepted tasks later marked `--defect`). Use it to decide whether Astra or higher effort pays off and whether the acceptance checks catch errors; do not change routing without it.
 
 ## Provenance
 `<repo>/.codex-offload/loop_<ts>/` holds `loop.json` (per attempt: rung, reasons, protected violations, new-tests check, acceptance tail, tokens), `a/` (baseline copy), `b1..bN/` (attempt trees, each with the `codex_run.py` record: route, usage before/after, events, last message, `run.json` with model, effort, codex version, token totals), and `final.patch`. Keep `loop.json` and `final.patch` with the commit.

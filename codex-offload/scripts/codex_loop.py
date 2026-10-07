@@ -12,9 +12,11 @@ Guards (each is checked by code, not by the model):
      those files added and PASS on the attempt tree. Without the command the attempt cannot be accepted.
 Escalation ladder (--ladder, default 'default,gpt-6-astra:xhigh,gpt-6-astra:max'): rung = 'default' | MODEL | MODEL:EFFORT.
 A failed attempt feeds its reasons and acceptance output into the next attempt (fresh baseline copy each time).
-Exit: 0 accepted | 10 gated before/between attempts | 12 usage limit hit | 20 acceptance not red on baseline |
-      2 bad input | 30 all attempts failed (Claude takes over)."""
-import argparse, fnmatch, hashlib, json, os, shutil, subprocess, sys, time, datetime
+  4. --bad-variant PATCH (repeatable, `patch -p1` format): known-wrong implementations the acceptance must REJECT.
+One loop at a time (lock file next to this script). Each loop appends an entry to the ledger (codex_ledger.py).
+Exit: 0 accepted | 10 gated before/between attempts | 12 usage limit hit | 20 acceptance invalid (passes baseline or a bad variant) |
+      2 bad input | 30 all attempts failed (Claude takes over) | 40 another loop is running."""
+import argparse, fcntl, fnmatch, hashlib, json, os, shutil, subprocess, sys, time, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKIP_DIRS = {".git", ".codex-offload", "__pycache__", ".pytest_cache"}
@@ -61,12 +63,13 @@ def parse_rung(r):
     m, _, e = r.partition(":")
     return m or None, e or None
 
-def main():
+def _main(holder):
     ap = argparse.ArgumentParser()
     ap.add_argument("task"); ap.add_argument("workdir")
     ap.add_argument("--accept", required=True)
     ap.add_argument("--accept-before", default="fail", choices=["fail", "pass", "skip"])
     ap.add_argument("--accept-file", action="append", default=[])
+    ap.add_argument("--bad-variant", action="append", default=[])
     ap.add_argument("--protect", action="append", default=[])
     ap.add_argument("--new-tests-cmd", default=None)
     ap.add_argument("--ladder", default="default,gpt-6-astra:xhigh,gpt-6-astra:max")
@@ -86,6 +89,7 @@ def main():
     protect = DEFAULT_PROTECT + a.protect
     acc_files = {f: sha(f) for f in a.accept_file if os.path.exists(f)}
     log = {"root": root, "accept": a.accept, "accept_before_mode": a.accept_before, "ladder": a.ladder, "attempts": [], "final": None}
+    log["started"] = int(time.time()); log["task_sha256"] = hashlib.sha256(task0.encode()).hexdigest(); log["workdir"] = wd; holder["log"] = log
     def save(): open(os.path.join(root, "loop.json"), "w").write(json.dumps(log, indent=1))
     # guard 1: acceptance must be red on the pristine baseline
     if a.accept_before != "skip":
@@ -96,6 +100,16 @@ def main():
         if (a.accept_before == "fail" and rc == 0) or (a.accept_before == "pass" and rc != 0):
             log["final"] = {"status": "acceptance_invalid", "detail": f"accept rc={rc} on baseline, expected {a.accept_before}"}
             save(); print(json.dumps(log["final"])); return 20
+    # guard 1b: acceptance must reject every known-bad variant
+    for bp in a.bad_variant:
+        probe = os.path.join(root, "probe"); copy_tree(base, probe)
+        pr = subprocess.run(["patch", "-p1", "-s", "-i", os.path.abspath(bp)], cwd=probe, capture_output=True, text=True)
+        if pr.returncode != 0:
+            log["final"] = {"status": "bad_variant_patch_failed", "detail": bp + ": " + (pr.stdout + pr.stderr)[-300:]}; save(); print(json.dumps(log["final"])); return 2
+        rc, out = run_cmd(a.accept, probe); shutil.rmtree(probe, ignore_errors=True)
+        log.setdefault("bad_variants", []).append({"patch": bp, "accept_rc": rc})
+        if rc == 0:
+            log["final"] = {"status": "acceptance_invalid", "detail": f"acceptance PASSES known-bad variant {bp}"}; save(); print(json.dumps(log["final"])); return 20
     prev = ""
     for k, rung in enumerate([r for r in a.ladder.split(",") if r.strip()], 1):
         model, effort = parse_rung(rung)
@@ -157,6 +171,40 @@ def main():
                 "\nFix the root cause; do not edit tests or checks.\n")
     log["final"] = {"status": "all_attempts_failed", "attempts": len(log["attempts"])}
     save(); print(json.dumps(log["final"])); return 30
+
+def _ledger_entry(log, rc):
+    atts = log.get("attempts", []); fin = log.get("final") or {}
+    tok = {}
+    for t in (x.get("tokens") or {} for x in atts):
+        for k, v in t.items(): tok[k] = tok.get(k, 0) + (v or 0)
+    cred = 0.0; usage_before = usage_after = None; on_credits = False
+    for x in atts:
+        rd = x.get("run_dir")
+        if rd and os.path.exists(os.path.join(rd, "run.json")):
+            rj = json.load(open(os.path.join(rd, "run.json")))
+            cred += (rj.get("credits") or {}).get("delta") or 0; on_credits = on_credits or bool(rj.get("on_credits"))
+            if usage_before is None and os.path.exists(os.path.join(rd, "usage_before.json")): usage_before = json.load(open(os.path.join(rd, "usage_before.json"))).get("windows")
+            if os.path.exists(os.path.join(rd, "usage_after.json")): usage_after = json.load(open(os.path.join(rd, "usage_after.json"))).get("windows")
+    return {"id": os.path.basename(log["root"]), "workdir": log.get("workdir"), "task_sha256": log.get("task_sha256"), "ladder": log.get("ladder"),
+            "status": fin.get("status", "unknown"), "exit_code": rc, "attempts": len(atts), "accepted_rung": fin.get("rung"),
+            "needs_review": fin.get("needs_review"), "tokens": tok, "credit_delta": round(cred, 6), "on_credits": on_credits,
+            "windows_before": usage_before, "windows_after": usage_after, "started": log.get("started"), "seconds": int(time.time()) - (log.get("started") or int(time.time())),
+            "outcome_check": None}
+
+def main():
+    lock = open(os.path.join(HERE, ".loop.lock"), "w")
+    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(json.dumps({"status": "busy", "detail": "another codex_loop.py is running"})); return 40
+    holder = {}
+    rc = _main(holder)
+    if "log" in holder:
+        try:
+            sys.path.insert(0, HERE); import codex_ledger
+            codex_ledger.append(_ledger_entry(holder["log"], rc))
+        except Exception as e:
+            print(json.dumps({"ledger_error": f"{type(e).__name__}: {e}"}))
+    return rc
 
 if __name__ == "__main__":
     sys.exit(main())
