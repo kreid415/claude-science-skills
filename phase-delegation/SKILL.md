@@ -68,4 +68,6 @@ Live test (2026-10-08): a `run` phase as CLUSTER_OPS submitted a job-watch job o
 - `triage` (CLUSTER_OPS, 125 s): root cause from segment logs and the bundle line, minimal fix (added params.json, one `cp` line), one resubmit Slurm 36243363 COMPLETED 0:0, values as in the original acceptance; audit ok.
 - In all three submits `outputs=['out']` returned 0 harvested files; children fell back to per-file download from the remote workdir. Name output files individually, or expect the fallback.
 - A child copies the `#SBATCH` lines into the submit command itself, because the harness reads directives only from the command string.
-Not yet tested: `analyze` phase; a denied approval; a cluster other than JHPCE.
+- `analyze` (ML_ANALYST, read-only, 106 s): built a 5-row per-segment table from the archived sacct, state.json and segment logs and checked that resumed segments continued from their checkpoints (arithmetic matched elapsed time to 0 s); marked the unit with no continued segment `not_assessable` and said that one checkpoint file was not archived. Audit ok.
+- A prediction in a brief that turns out false (an OOM that did not happen) came back as `partial`/not-ok with observed values and no edits or reruns, as the brief required; write predictions as checks the child may fail.
+Not yet tested: a denied approval; a cluster other than JHPCE.

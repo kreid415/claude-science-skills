@@ -1,0 +1,1 @@
+Live JHPCE smoke workloads (2026-10-08): run_cycle_pd.sh (+app.py from phase-delegation/tests/cluster-smoke, memhog.py) tests OOM and --cycle; run_oom_pd.sh (+memhog2.py) holds 2000 MB under --mem 1G. They need jw.py from job-watch/scripts. On JHPCE shared the OOM prediction was false (no OUT_OF_MEMORY).
