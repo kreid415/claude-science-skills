@@ -259,7 +259,7 @@ def handoff_wave_offer(quiet, msgs, last_end_ms, offered_ms=0, min_msgs=150):
     return bool(quiet and (msgs or 0) >= min_msgs and last_end_ms and last_end_ms > (offered_ms or 0))
 
 
-def _handoff_check_cmd(job):
+def handoff_check_cmd(job):
     import json as _json
     h = job.get("remote_handle")
     try:
@@ -288,7 +288,7 @@ def handoff_run_state_rows(jobs, watchers=(), boards=(), children=()):
         if str(j.get("state", "")).lower() in HANDOFF_JOB_TERMINAL:
             continue
         rows.append("| job | `{}` | {} | {} | `{}` |".format(j["job_id"], j.get("provider", "?"), j.get("state", "?"),
-                                                           _handoff_check_cmd(j)))
+                                                           handoff_check_cmd(j)))
     for w in watchers:
         if w.get("status") not in (None, "running"):
             continue
