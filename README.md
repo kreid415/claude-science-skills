@@ -60,8 +60,14 @@ restarts from real faults using the daemon's own logs.
 ### `session-handoff`
 Judge whether a working session has grown long enough to hand off, and write
 the handoff artifact that lets a fresh session continue without losing the
-thread. Rotation is judged on task boundaries first and size second. Thresholds
-are derived from measured session data rather than convention.
+thread. Size fires it automatically (300 messages, 280k tokens of latest
+context, or the first fold; thresholds from measured session data, in
+`references/thresholds.md`). Task boundaries and wave boundaries (no live ledger
+job, sub-agent, status-board unit or watcher; a job ended since the last offer;
+150+ messages) only offer. The handoff's run-state table lists each live job and
+watcher with its host and a read-only check any chat can run (`sacct -j`,
+`ps -g`, `jw.py status`). Tests: `tests/session-handoff_tests.py`, including
+identity of the copies inlined in the per-turn repl check.
 
 ### `paper-outline`
 Maintain a living, citation-backed outline of the paper a project is building
@@ -165,6 +171,9 @@ Offload large, self-contained code and text-editing tasks from Claude Science to
 
 ### `job-watch`
 Supervise a long job without an LLM polling it. `scripts/jw.py` (stdlib, Python 3.8+) runs a local process group or a SLURM job, watches it with `tick`/`watch`, and ends with one report line and an exit code. SLURM: TIMEOUT resubmits with a longer `--time` (capped), OUT_OF_MEMORY with more `--mem`, NODE_FAIL/PREEMPTED unchanged, CANCELLED stops for a human; restartable programs get USR1 before the limit and exit 85 to mean "checkpointed, continue". `--cycle` handles jobs designed to run to the wall and continue (same `--time`, `--time max`, no-progress guards, `--follow-file` for self-resubmitting jobs). Local: stall detection, restart after kill or crash, attach to an existing PID. Only job ids the state recorded are ever queried or cancelled. Tests: `tests/job-watch_tests.py` (real local processes, fake SLURM, the generated wrapper run for real). Validated end to end for local jobs on a real host, and on a live SLURM cluster (JHPCE `shared`, 2026-10-08, Slurm jobs 36241109/36241151 and 36241110/36241141, Python 3.9.18): a USR1 checkpoint-and-continue (exit 85, resumed from the checkpoint) and a TIMEOUT resubmit with a longer `--time` (1 min to 2 min, resumed from the checkpoint), both validated `done`. With `--signal-margin 90` on a 3-minute limit, USR1 arrived 65 s into the job, 25 s earlier than nominal. Not yet tested on a live cluster: OOM, NODE_FAIL/PREEMPTED, `--cycle`, `--follow-file`, Python 3.8 (a static check with vermin gives 3.7 as the minimum).
+
+### `phase-delegation`
+Keep the main chat a thin coordinator: each well-specified phase (run, validate, triage, analyze) runs in a fresh sub-agent with a brief, a structured-output schema, artifacts in and out, and an audit (`scripts/pd.py`: `pd_brief`, `pd_request`, `PD_SCHEMA`, `pd_audit`). The coordinator dispatches with `wait=False` and parks; a `run` child waits for its own jobs' `compute_done` and never returns with a job live. Tests: `tests/phase-delegation_tests.py`. Live-tested 2026-10-08 with a job-watch run phase on a local host (89 s, audit ok); not yet tested on a cluster or for validate/triage/analyze phases.
 
 ## Tests
 
