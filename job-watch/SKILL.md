@@ -21,9 +21,9 @@ jw.py tick | status | stop --state DIR
 ```
 `--state` is a directory on a filesystem the watcher can always reach (cluster: scratch; never a node-local /tmp). All progress lives in `state.json`; the watcher can die and a new one continues the same job (`start` is not repeated).
 
-Common options: `--workdir`, `--expect FILE` (repeatable, must exist and be non-empty), `--validate CMD` (exit 0 = output valid), `--retries N` (plain failures, default 1), `--max-attempts N` (total segments, default 6), `--tag`.
+Common options: `--workdir`, `--expect FILE` (repeatable, must exist and be non-empty), `--validate CMD` (exit 0 = output valid), `--retries N` (plain failures, default 1), `--max-attempts N` (total segments, default 6; 500 in `--cycle` mode), `--tag`.
 Local: `--stall-min M` (kill and retry if log/`--progress-file` stops growing), `--resume-cmd CMD`.
-SLURM: `--time HH:MM:SS`, `--time-factor 1.5`, `--max-time`, `--mem 8G`, `--mem-factor 1.5`, `--max-mem`, `--sbatch-args "--partition=... --account=..."`, `--restartable`, `--signal-margin 600`, `--signal-mode sbatch|scancel|none`.
+SLURM: `--time HH:MM:SS|max`, `--cycle`, `--max-cycles`, `--follow-file`, `--time-factor 1.5`, `--max-time`, `--mem 8G`, `--mem-factor 1.5`, `--max-mem`, `--sbatch-args "--partition=... --account=..."`, `--restartable`, `--signal-margin 600`, `--signal-mode sbatch|scancel|none`.
 
 The command sees `JW_ATTEMPT` (1,2,...), `JW_RESUME` (0 first time, 1 on every re-run), `JW_SEGMENT`, `JW_STATE`.
 
@@ -41,6 +41,13 @@ The command sees `JW_ATTEMPT` (1,2,...), `JW_RESUME` (0 first time, 1 on every r
 | FAILED other | retry `--retries` times, then failed |
 | CANCELLED | someone else's decision: needs_human, never resubmit |
 Limits: `--max-attempts` segments, then needs_human. Only job ids this state recorded are ever queried or cancelled (never `-u`, never account-wide: other agents share these accounts).
+
+## Jobs designed to run to the wall and continue (cycle mode)
+Many jobs are meant to use the full job time and then continue from a checkpoint as the end approaches. For these a time-limit hit is expected, not a failure, and the time must not grow. Use:
+- `--cycle` with `--time max` (the partition limit, read with `sinfo` from `--sbatch-args "--partition=P"`) or an explicit `--time`. The program checkpoints on USR1 (sent `--signal-margin` seconds before the end; default 600) and exits; job-watch submits the next segment at the same `--time` with `JW_RESUME=1`. A TIMEOUT instead of a clean checkpoint is also continued. The segment limit is `--max-cycles` (default 500), not `--max-attempts`.
+- Guards against a loop that makes no progress: needs_human when 3 consecutive segments end in under 25% of their limit without being asked to stop, or when `--progress-file` (repeatable, globs allowed, relative to `--workdir`) is unchanged across 2 consecutive cycles. Always pass `--progress-file` pointing at the checkpoint for long chains.
+- If the program resubmits itself near the end, have it write the new job id to a file and pass `--follow-file FILE`: when a segment ends (COMPLETED but not valid, TIMEOUT, exit 85), job-watch tracks the declared successor instead of submitting another. If the final job's output validates, the chain ends `done`; a successor left queued by the program is not cancelled (cancel it yourself).
+Validity still comes only from `--expect`/`--validate`; a cycle that exits 0 without valid output after a checkpoint request is continued, never reported done.
 
 ## Time-limit approach: checkpoint before the wall
 Default `--signal-mode sbatch` adds `--signal=B:USR1@600`; the generated wrapper forwards USR1 to the program and turns a nonzero exit after the signal into exit 85. If the program checkpoints on USR1 and exits, the next segment starts with `JW_RESUME=1` and continues without waiting for a TIMEOUT. Use `--signal-mode scancel` on clusters that disallow `--signal`, or `none` for programs that cannot checkpoint (they are then resubmitted from scratch with a longer `--time` after TIMEOUT). A program is `--restartable` only if it resumes correctly from its own checkpoint when `JW_RESUME=1`.
@@ -69,4 +76,4 @@ After `watch` returns, report only: `report_line`, exit code meaning, and the ar
 Job arrays and dependency chains (supervise each unit with its own state, or use run-status-board for the array). Cross-host jobs. Programs that cannot resume: job-watch will rerun them from the beginning.
 
 ## Tests
-`tests/job-watch_tests.py` (stdlib, ~1 min): real local processes (success, retry, stall kill, external SIGKILL, stop, attach, lock, deadline) and a fake SLURM driven by per-job plans (TIMEOUT/OOM/NODE_FAIL/FAILED/CANCELLED/exit 85/USR1/validation/max attempts/own-ids-only/sbatch failure/attach). The generated sbatch wrapper's USR1 handling is run for real. Live-cluster validation is recorded in the repo README.
+`tests/job-watch_tests.py` (stdlib, ~1 min): real local processes (success, retry, stall kill, external SIGKILL, stop, attach, lock, deadline) and a fake SLURM driven by per-job plans (cycle mode, follow-file, `--time max`, TIMEOUT/OOM/NODE_FAIL/FAILED/CANCELLED/exit 85/USR1/validation/max attempts/own-ids-only/sbatch failure/attach). The generated sbatch wrapper's USR1 handling is run for real. Live-cluster validation is recorded in the repo README.

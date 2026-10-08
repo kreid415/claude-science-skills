@@ -73,6 +73,7 @@ import json, os, re, sys
 D = os.environ["FAKE_DIR"]; name = os.path.basename(sys.argv[0]); a = sys.argv[1:]
 def jl(): return os.path.join(D, "calls.log")
 open(jl(), "a").write(name + " " + " ".join(a) + "\n")
+if name == "sinfo": print("3-00:00:00"); sys.exit(0)
 plan = json.load(open(os.path.join(D, "plan.json")))
 def jobfile(j): return os.path.join(D, "job_%s.json" % j)
 if name == "sbatch":
@@ -106,12 +107,14 @@ if name == "squeue":
     sys.exit(0)
 if name == "sacct":
     if not j: sys.exit(0)
-    p = j["plan"]
-    print("%s|%s|%s|00:20:00|" % (jid, p["final"], p.get("exit", "0:0")))
-    print("%s.batch|%s|%s|00:20:00|%s" % (jid, p["final"], p.get("exit", "0:0"), p.get("maxrss", "")))
+    p = j["plan"]; el = p.get("elapsed", "00:20:00")
+    if p.get("touch"): open(p["touch"], "w").write(str(jid))
+    if p.get("write"): open(p["write"]["path"], "w").write(p["write"]["text"])
+    print("%s|%s|%s|%s|" % (jid, p["final"], p.get("exit", "0:0"), el))
+    print("%s.batch|%s|%s|%s|%s" % (jid, p["final"], p.get("exit", "0:0"), el, p.get("maxrss", "")))
     sys.exit(0)
 '''
-for n in ("sbatch", "squeue", "sacct", "scancel"):
+for n in ("sbatch", "squeue", "sacct", "scancel", "sinfo"):
     p = os.path.join(FB, n); open(p, "w").write(FAKE); os.chmod(p, 0o755)
 def slurm(name, plan, *extra, ticks=12, pre=None):
     st, wd = sdir(name); fd = os.path.join(T, name + "_fake"); os.makedirs(fd, exist_ok=True)
@@ -155,6 +158,31 @@ check("slurm: CANCELLED by someone else stops for a human; no resubmission", rc 
 rc, out, jobs, calls, st, env, fd = slurm("s8", {"jobs": [{"final": "TIMEOUT", "running_ticks": 4, "left_seq": ["00:30:00", "00:09:00", "00:05:00", "00:02:00"]}, {"final": "COMPLETED", "running_ticks": 1}]}, "--signal-mode", "scancel", "--signal-margin", "600")
 sc = [c for c in calls if c.startswith("scancel")]
 check("slurm: --signal-mode scancel sends USR1 once, to the recorded job only, when the remaining time falls under the margin", len(sc) == 1 and "--signal=USR1" in sc[0] and sc[0].endswith("1001"))
+# ---- jobs designed to run to the wall and continue (cycle mode), self-resubmitting jobs, --time max
+rc, out, jobs, calls, st, env, fd = slurm("c1", {"jobs": [{"final": "TIMEOUT", "elapsed": "01:00:00", "running_ticks": 1}] * 8 + [{"final": "COMPLETED", "running_ticks": 1}]}, "--cycle", ticks=40)
+check("cycle: TIMEOUT at the wall is by design; 8 cycles continue at the SAME --time (no growth), beyond the 6-segment default, then done", rc == 0 and len(jobs) == 9 and {j["args"]["time"] for j in jobs.values()} == {"01:00:00"})
+rc, out, jobs, calls, st, env, fd = slurm("c2", {"jobs": [{"final": "FAILED", "exit": "85:0", "elapsed": "00:01:00", "running_ticks": 1}] * 9}, "--cycle", ticks=30)
+check("cycle: segments that keep ending early (<25% of the limit) without being asked are not cycling: needs_human after 3", rc == 30 and len(jobs) == 3)
+os.makedirs(os.path.join(T, "c3", "w"), exist_ok=True); pf = os.path.join(T, "c3", "prog.txt"); open(pf, "w").write("0")
+rc, out, jobs, calls, st, env, fd = slurm("c3", {"jobs": [{"final": "TIMEOUT", "elapsed": "01:00:00", "running_ticks": 1}] * 9}, "--cycle", "--progress-file", pf, ticks=30)
+check("cycle: cycles with an unchanged --progress-file stop for a human after 2 repeats (3 jobs)", rc == 30 and len(jobs) == 3)
+pf4 = os.path.join(T, "c4_prog.txt")
+rc, out, jobs, calls, st, env, fd = slurm("c4", {"jobs": [{"final": "TIMEOUT", "elapsed": "01:00:00", "running_ticks": 1, "touch": pf4}] * 5 + [{"final": "COMPLETED", "running_ticks": 1}]}, "--cycle", "--progress-file", pf4, ticks=40)
+check("cycle: cycles that keep changing the --progress-file continue until done", rc == 0 and len(jobs) == 6)
+ff = os.path.join(T, "c5_next.txt")
+st, wd = sdir("c5"); fd = os.path.join(T, "c5_fake"); os.makedirs(fd, exist_ok=True)
+json.dump({"jobs": [{"final": "TIMEOUT", "running_ticks": 1, "write": {"path": ff, "text": "2001\n"}}]}, open(os.path.join(fd, "plan.json"), "w"))
+json.dump({"id": 2001, "plan": {"final": "COMPLETED", "running_ticks": 1}, "args": {"time": "01:00:00"}, "ticks": 0}, open(os.path.join(fd, "job_2001.json"), "w"))
+env = dict(os.environ, PATH=FB + os.pathsep + os.environ["PATH"], FAKE_DIR=fd)
+run(["start", "--state", st, "--kind", "slurm", "--cmd", "x", "--workdir", wd, "--time", "01:00:00", "--follow-file", ff], env=env)
+for _ in range(10):
+    rc, out = run(["tick", "--state", st], env=env)
+    if rc != 10: break
+ids = [x["id"] for x in json.load(open(os.path.join(st, "state.json")))["segments"]]
+nsb = sum(1 for l in open(os.path.join(fd, "calls.log")) if l.startswith("sbatch"))
+check("follow: a job that resubmits itself and writes the successor id is followed (no extra sbatch); the chain ends done", rc == 0 and ids[-1] == 2001 and len(ids) == 2 and nsb == 1)
+rc, out, jobs, calls, st, env, fd = slurm("c6", {"jobs": [{"final": "COMPLETED", "running_ticks": 1}]}, "--time", "max", ticks=3)
+check("--time max resolves the partition limit from sinfo (3 days) for the first submission", rc == 0 and jobs[1001]["args"]["time"].startswith("3-00:00") and any(c.startswith("sinfo") and "-p cpu" in c for c in calls))
 rc, out, jobs, calls, st, env, fd = slurm("s9", {"jobs": [{"final": "COMPLETED", "running_ticks": 1}]})
 sb = jobs[1001]["args"]["script_text"]
 check("slurm: default signal mode puts --signal=B:USR1@600 in the sbatch script", jobs[1001]["args"].get("signal") == "B:USR1@600" and "trap" in sb)

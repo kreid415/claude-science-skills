@@ -181,6 +181,58 @@ def submit_slurm(d, st, resume, time_s=None, mem_mb=None):
     st["segments"].append(seg); note(st, f"submitted slurm segment {n} as job {seg['id']} (--time {fmt_time(time_s)}" + (f", --mem {mem_mb}M" if mem_mb else "") + ")")
     return seg
 
+def partition_max(sbatch_args):
+    m = re.search(r"(?:--partition[= ]|-p[ =]?)(\S+)", sbatch_args or "")
+    if not m: return None
+    rc, out, err = sh(["sinfo", "-h", "-p", m.group(1).split(",")[0], "-o", "%l"])
+    return parse_time(out.split()[0]) if rc == 0 and out.split() else None
+
+def progress_sig(c):
+    import glob
+    sig = []
+    for pat in c.get("progress_files") or []:
+        for f in sorted(glob.glob(pat if os.path.isabs(pat) else os.path.join(c["workdir"], pat))):
+            try: stt = os.stat(f); sig.append([f, stt.st_mtime_ns, stt.st_size])
+            except OSError: pass
+    return sig
+
+def cycle_guard(st, seg):
+    """Cycle mode: ending at the limit or after a checkpoint request is by design. Stop for a human only when cycles stop making progress."""
+    c = st["config"]
+    if not c.get("cycle"): return None
+    tl = seg.get("time_s") or c.get("time_s") or 0; el = parse_time(seg.get("elapsed") or "") or 0
+    expected = seg.get("state") == "TIMEOUT" or seg.get("signalled")
+    if tl and el < 0.25 * tl and not expected: st["short_cycles"] = st.get("short_cycles", 0) + 1
+    else: st["short_cycles"] = 0
+    if st["short_cycles"] >= 3: return f"3 consecutive segments ended in under 25% of their time limit without being asked to stop; the program is exiting early, not cycling"
+    if c.get("progress_files"):
+        sig = progress_sig(c)
+        if st.get("last_progress") is not None and sig == st["last_progress"]: st["noprog"] = st.get("noprog", 0) + 1
+        else: st["noprog"] = 0
+        st["last_progress"] = sig
+        if st["noprog"] >= 2: return "2 consecutive cycles without any change to --progress-file; not resubmitting a job that makes no progress"
+    return None
+
+def follow_next(st):
+    f = st["config"].get("follow_file")
+    if not f: return None
+    p = f if os.path.isabs(f) else os.path.join(st["config"]["workdir"], f)
+    try: m = re.search(r"\d+", open(p).read())
+    except OSError: return None
+    if not m: return None
+    jid = int(m.group(0))
+    return jid if jid not in [x["id"] for x in st["segments"]] else None
+
+def try_follow(d, st, seg, left):
+    """The program resubmits itself and writes the successor's job id to --follow-file: track that job instead of submitting another."""
+    nxt = follow_next(st)
+    if not nxt or not left: return None
+    g = cycle_guard(st, seg)
+    if g: return finish(d, st, "needs_human", g)
+    q = squeue_row(nxt)
+    st["segments"].append({"n": len(st["segments"]) + 1, "id": nxt, "state": (q or {}).get("state", "PENDING"), "submitted": now(), "time_s": (q or {}).get("limit"), "mem_mb": seg.get("mem_mb"), "resume": True, "signalled": False, "sacct_miss": 0, "followed": True})
+    note(st, f"job {seg['id']} ended {seg['state']}; following its successor job {nxt} (declared in the follow file)"); return "running"
+
 def squeue_row(jid):
     rc, out, err = sh(["squeue", "-h", "-j", str(jid), "-o", "%T|%M|%l|%L"])
     out = out.strip()
@@ -224,12 +276,24 @@ def tick_slurm(d, st):
         ok, why = validate(st)
         if ok: return finish(d, st, "done", f"job {jid} completed and validated")
         seg["validation"] = why
-        if seg.get("signalled") and left: note(st, "completed after a checkpoint signal but not complete; continuing"); return resubmit(d, st, True)
+        r = try_follow(d, st, seg, left)
+        if r: return r
+        if seg.get("signalled") and left:
+            g = cycle_guard(st, seg)
+            if g: return finish(d, st, "needs_human", g)
+            note(st, "completed after a checkpoint signal but not complete; continuing"); return resubmit(d, st, True)
         if left and c.get("retries", 0) > st["retries_used"]:
             st["retries_used"] += 1; note(st, f"job {jid} completed but validation failed ({why}); retry {st['retries_used']}/{c['retries']}"); return resubmit(d, st, True)
         return finish(d, st, "failed", f"job {jid} completed but validation failed: {why}")
+    if s == "TIMEOUT" or (s == "FAILED" and code == str(CONTINUE_EXIT)):
+        r = try_follow(d, st, seg, left)
+        if r: return r
     if s == "CANCELLED": return finish(d, st, "needs_human", f"job {jid} was cancelled by someone else; not resubmitting")
     if not left: return finish(d, st, "needs_human", f"job {jid} ended {s}; {c['max_attempts']} segments used")
+    if s == "TIMEOUT" and c.get("cycle"):
+        g = cycle_guard(st, seg)
+        if g: return finish(d, st, "needs_human", g)
+        note(st, f"job {jid} reached its time limit as designed (cycle {len(st['segments'])}); continuing from checkpoint at the same --time"); return resubmit(d, st, True)
     if s == "TIMEOUT":
         cur = seg["time_s"] or c["time_s"]
         if not c.get("max_time_s"): c["max_time_s"] = (c.get("time_s") or cur) * 4      # default cap: 4x the first --time
@@ -247,7 +311,10 @@ def tick_slurm(d, st):
         if new > mxm: return finish(d, st, "needs_human", f"job {jid} ran out of memory at {cur}M; next step {new}M exceeds --max-mem {mxm}M")
         note(st, f"job {jid} ran out of memory ({cur}M); resubmitting with --mem {new}M"); return resubmit(d, st, True, mem_mb=new)
     if s in INFRA: note(st, f"job {jid} ended {s}; resubmitting unchanged"); return resubmit(d, st, True)
-    if s == "FAILED" and code == str(CONTINUE_EXIT): note(st, f"job {jid} checkpointed (exit {CONTINUE_EXIT}); continuing"); return resubmit(d, st, True)
+    if s == "FAILED" and code == str(CONTINUE_EXIT):
+        g = cycle_guard(st, seg)
+        if g: return finish(d, st, "needs_human", g)
+        note(st, f"job {jid} checkpointed (exit {CONTINUE_EXIT}); continuing"); return resubmit(d, st, True)
     if s == "FAILED" and c.get("retries", 0) > st["retries_used"]:
         st["retries_used"] += 1; note(st, f"job {jid} failed (exit {a['exit']}); retry {st['retries_used']}/{c['retries']}"); return resubmit(d, st, True)
     return finish(d, st, "failed", f"job {jid} ended {s} (exit {a['exit']})")
@@ -296,11 +363,15 @@ def cmd_start(a):
     if os.path.exists(os.path.join(d, "state.json")): print(json.dumps({"error": "state exists; use a new --state"})); return 2
     if a.kind == "slurm" and not (a.cmd or a.script or a.attach_job): print(json.dumps({"error": "slurm needs --cmd, --script or --attach-job"})); return 2
     if a.kind == "local" and not (a.cmd or a.attach_pid): print(json.dumps({"error": "local needs --cmd or --attach-pid"})); return 2
-    t = parse_time(a.time) if a.time else None
+    if a.time == "max":
+        t = partition_max(a.sbatch_args)
+        if not t: print(json.dumps({"error": "--time max needs --sbatch-args with --partition and a finite partition limit from sinfo"})); return 2
+    else: t = parse_time(a.time) if a.time else None
+    if a.cycle and a.kind != "slurm": print(json.dumps({"error": "--cycle is for slurm jobs"})); return 2
     cfg = {"kind": a.kind, "cmd": a.cmd, "script": os.path.abspath(a.script) if a.script else None, "resume_cmd": a.resume_cmd, "workdir": os.path.abspath(a.workdir),
-           "validate": a.validate, "expect": a.expect, "max_attempts": a.max_attempts, "retries": a.retries, "restartable": a.restartable,
+           "validate": a.validate, "expect": a.expect, "max_attempts": a.max_attempts or (a.max_cycles if a.cycle else 6), "cycle": a.cycle, "follow_file": a.follow_file, "retries": a.retries, "restartable": a.restartable,
            "stall_min": a.stall_min, "progress_files": a.progress_file, "sbatch_args": a.sbatch_args, "time_s": t, "time_factor": a.time_factor,
-           "max_time_s": parse_time(a.max_time) if a.max_time else (t * 4 if t else None), "mem_mb": parse_mem(a.mem), "mem_factor": a.mem_factor,
+           "max_time_s": parse_time(a.max_time) if a.max_time else ((t if a.cycle else t * 4) if t else None), "mem_mb": parse_mem(a.mem), "mem_factor": a.mem_factor,
            "max_mem_mb": parse_mem(a.max_mem) if a.max_mem else (parse_mem(a.mem) * 4 if a.mem else None), "signal_margin": a.signal_margin, "signal_mode": a.signal_mode, "max_pending_h": a.max_pending_hours}
     st = {"tag": a.tag or os.path.basename(d.rstrip("/")), "status": "running", "created": now(), "config": cfg, "segments": [], "retries_used": 0, "notes": []}
     os.makedirs(cfg["workdir"], exist_ok=True)
@@ -360,7 +431,7 @@ def main():
     s = sp.add_parser("start"); s.add_argument("--state", required=True); s.add_argument("--kind", required=True, choices=["local", "slurm"]); s.add_argument("--tag")
     s.add_argument("--cmd"); s.add_argument("--resume-cmd"); s.add_argument("--script"); s.add_argument("--attach-pid", type=int); s.add_argument("--attach-job"); s.add_argument("--log"); s.add_argument("--exit-file")
     s.add_argument("--workdir", default="."); s.add_argument("--validate"); s.add_argument("--expect", action="append", default=[])
-    s.add_argument("--max-attempts", type=int, default=6); s.add_argument("--retries", type=int, default=1); s.add_argument("--restartable", action="store_true")
+    s.add_argument("--max-attempts", type=int, default=None); s.add_argument("--cycle", action="store_true"); s.add_argument("--max-cycles", type=int, default=500); s.add_argument("--follow-file"); s.add_argument("--retries", type=int, default=1); s.add_argument("--restartable", action="store_true")
     s.add_argument("--stall-min", type=float); s.add_argument("--progress-file", action="append", default=[])
     s.add_argument("--sbatch-args", default=""); s.add_argument("--time"); s.add_argument("--time-factor", type=float, default=1.5); s.add_argument("--max-time")
     s.add_argument("--mem"); s.add_argument("--mem-factor", type=float, default=1.5); s.add_argument("--max-mem")
