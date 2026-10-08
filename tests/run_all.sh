@@ -18,5 +18,6 @@ else echo "SKIP bio-diagram (needs cairosvg, lxml, pypdf)"; fi
 if python "$ROOT/tests/codex-offload_tests.py" > /tmp/co_out.txt 2>&1; then echo "PASS codex-offload: $(tail -1 /tmp/co_out.txt)"; else echo "FAIL codex-offload"; tail -20 /tmp/co_out.txt; fail=1; fi
 if python "$ROOT/tests/codex-offload_loop_tests.py" > /tmp/col_out.txt 2>&1; then echo "PASS codex-offload loop: $(tail -1 /tmp/col_out.txt)"; else echo "FAIL codex-offload loop"; tail -20 /tmp/col_out.txt; fail=1; fi
 if python "$ROOT/tests/session-handoff_tests.py" > /tmp/sh_out.txt 2>&1; then echo "PASS session-handoff: $(tail -1 /tmp/sh_out.txt)"; else echo "FAIL session-handoff"; tail -20 /tmp/sh_out.txt; fail=1; fi
+if python "$ROOT/tests/phase-delegation_tests.py" > /tmp/pd_out.txt 2>&1; then echo "PASS phase-delegation: $(tail -1 /tmp/pd_out.txt)"; else echo "FAIL phase-delegation"; tail -20 /tmp/pd_out.txt; fail=1; fi
 if python "$ROOT/tests/job-watch_tests.py" > /tmp/jw_out.txt 2>&1; then echo "PASS job-watch: $(tail -1 /tmp/jw_out.txt)"; else echo "FAIL job-watch"; tail -20 /tmp/jw_out.txt; fail=1; fi
 exit $fail
