@@ -181,3 +181,6 @@ Supervise a long job without an LLM polling it. `scripts/jw.py` (stdlib, Python 
 ```
 
 `kernel.py` sidecars follow the Claude Science sidecar rules (functions, imports and literal constants only) and are auto-loaded when the skill is activated. Several skills call the Claude Science `host` API; outside Claude Science the pure-Python helpers (`fl_*`, `cg_*`, `pf_*`, `scpf_*`, `si_*`, `dg_*`, `rs_*`) can be imported by exec-ing `kernel.py`. Internal catalog metadata (`.catalog_stamp`, `.sync-org`, `.authorship`) is deliberately not versioned.
+
+### `cluster-rules`
+The user's standing rules for cluster work: conda/venv environments live in `$HOME`; all data (working dirs, logs, checkpoints, TMPDIR, model/dataset/package/container caches) lives on scratch, which is purged and never the durable copy; never issue account-wide scheduler commands (`scancel -u`) on shared accounts, and cancel only job IDs the session itself submitted. Instruction-only skill (no kernel, no tests); loaded before any cluster job, environment build, path decision or scheduler command.
