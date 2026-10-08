@@ -1,14 +1,90 @@
 """Helpers for the session-handoff skill (python kernel).
 
-The size self-check lives in the repl tool (host.query is only there); these
-helpers run in the python/R analysis kernel, where host.artifacts() is
-available, and do the mechanical part of drafting the handoff: listing this
-session's artifacts with resolvable version ids, and saving the document.
+The size check itself runs in the repl tool (host.query is only there). It inlines
+handoff_trigger below, and a test keeps the two copies identical. These helpers run
+in the python/R analysis kernel, where host.artifacts() is available, and do the
+mechanical parts: the automatic size trigger, listing this session's artifacts with
+resolvable version ids, building and checking the start message for the next chat,
+and writing the handoff document.
 """
 
-HANDOFF_SECTIONS = ("Objective", "State", "Artifacts", "Kernel state (will be lost)",
-                    "Decisions", "Dead ends", "Next steps",
+HANDOFF_SECTIONS = ("Start message for the next chat", "Objective", "State", "Artifacts",
+                    "Kernel state (will be lost)", "Decisions", "Dead ends", "Next steps",
                     "Open questions for the user")
+
+
+def handoff_trigger(msgs, ctx_used, folds, last_msgs=0, last_folds=0):
+    """Automatic size trigger: any of 300 messages, 280k tokens of latest context, 1 fold.
+
+    Returns {'fire': bool, 'reasons': [...], 'urgent': bool}. After a handoff, pass the
+    (messages, folds) recorded then; the trigger re-arms only after 150 more messages
+    or a new fold. 'urgent' means 2000+ messages: hand off now, even with jobs in flight.
+    """
+    msgs = msgs or 0
+    ctx_used = ctx_used or 0
+    folds = folds or 0
+    reasons = []
+    if msgs >= 300:
+        reasons.append("{} messages (trigger 300)".format(msgs))
+    if ctx_used >= 280000:
+        reasons.append("{}k tokens of latest context (trigger 280k)".format(ctx_used // 1000))
+    if folds >= 1:
+        reasons.append("{} fold(s) so far".format(folds))
+    armed = (not last_msgs) or (msgs - last_msgs >= 150) or (folds > last_folds)
+    return {"fire": bool(reasons) and armed, "reasons": reasons, "urgent": msgs >= 2000}
+
+
+def handoff_start_message(topic, objective, next_action, handoff_artifact_id, prev_frame_id,
+                          open_first=None, lost_state=None, pending=None, do_not_redo=None,
+                          max_words=150):
+    """Ready-to-paste first message for the next chat (plain text, no artifact markers).
+
+    Names the handoff file and its full artifact id so the new chat can find it by id even
+    without an @-mention, and the previous chat's frame id so its archive can be searched.
+    Raises ValueError when over max_words: shorten the fields, the detail belongs in the
+    handoff file.
+    """
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", str(topic).lower()).strip("-") or "session"
+    lines = [
+        "Continue from HANDOFF-{}.md (artifact id {}) in this project; read it before doing "
+        "anything else.".format(slug, handoff_artifact_id),
+        "Objective: {}".format(objective),
+        "Next action: {}".format(next_action),
+    ]
+    if open_first:
+        lines.append("Open first: " + "; ".join(open_first[:5]))
+    if lost_state:
+        lines.append("Lost with the old kernel: " + lost_state)
+    if pending:
+        lines.append("Pending: " + "; ".join(pending))
+    if do_not_redo:
+        lines.append("Do not redo: " + "; ".join(do_not_redo[:3]))
+    lines.append("Before reusing any identifier, number or quote from the previous chat "
+                 "(frame {}), search its archive.".format(prev_frame_id))
+    text = "\n".join(lines)
+    n = len(text.split())
+    if n > max_words:
+        raise ValueError("start message is {} words (cap {}); shorten the fields".format(n, max_words))
+    return text
+
+
+def handoff_check_start(text, max_words=170):
+    """Problems that would strand the next chat: missing file name or ids, markers, length."""
+    import re
+    problems = []
+    if not re.search(r"HANDOFF-[a-z0-9-]+\.md", text):
+        problems.append("does not name the HANDOFF-<topic>.md file")
+    ids = set(re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", text))
+    if len(ids) < 2:
+        problems.append("needs the handoff artifact id and the previous chat's frame id in full "
+                        "(found {} distinct id(s))".format(len(ids)))
+    if "{{" in text or "/home/" in text or "/tmp/" in text:
+        problems.append("contains an artifact marker or local path; use plain ids")
+    n = len(text.split())
+    if n > max_words:
+        problems.append("{} words (cap {})".format(n, max_words))
+    return problems
 
 
 def handoff_artifact_lines(frame_id=None, limit=200):
@@ -101,14 +177,20 @@ def handoff_write(topic, body, outdir=None):
 def handoff_check(text):
     """Flag the failure modes that strand a receiving session.
 
-    Returns a list of problems: missing sections, bare filenames that will not
-    resolve from a new session, and placeholders left unfilled.
+    Returns a list of problems: missing sections, a start message that would not work
+    from a fresh chat, bare filenames that will not resolve from a new session, and
+    placeholders left unfilled.
     """
     import re
     problems = []
     for sec in HANDOFF_SECTIONS:
         if "## " + sec not in text:
             problems.append("missing section: {}".format(sec))
+    start = re.search(r"## Start message for the next chat\s*```[a-z]*\n(.*?)```", text, re.S)
+    if start:
+        problems += ["start message: " + p for p in handoff_check_start(start.group(1))]
+    elif "## Start message for the next chat" in text:
+        problems.append("start message section has no fenced block")
     for m in re.finditer(r"\[([^\]]+\.\w{1,6})\]\(([^)]+)\)", text):
         target = m.group(2)
         if "artifact:" in target:

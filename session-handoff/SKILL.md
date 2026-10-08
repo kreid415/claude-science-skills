@@ -1,13 +1,13 @@
 ---
 name: session-handoff
-description: Judge whether a working session has grown long enough to hand off, and write the handoff artifact that lets a fresh session continue without losing the thread. Use when the user asks "is this session too long", "should I start a new session", "can you hand this off", "write a handoff", "summarize where we are so I can continue tomorrow", or worries about slowness, context limits, or losing work on restart; also run the cheap size self-check at natural checkpoints in any long session and raise rotation yourself when the numbers cross the thresholds here. Rotation is judged on TASK BOUNDARIES first and size second — a long session on one continuous task is fine, a short one that changed topic is not. Not for the daemon-level restart, memory or database symptoms of the app process itself (that is science-daemon-ops), and not for compacting a single oversized artifact.
+description: Run automatically when a working session has grown too long to sustain performance and token cost (300 messages, 280k tokens of latest context, or the first fold), and produce the handoff artifact plus a ready-to-paste starter message for the next chat. Also use when the user asks "is this session too long", "should I start a new session", "can you hand this off", "write a handoff", "summarize where we are so I can continue tomorrow", or worries about slowness, context limits, or losing work on restart. The user's profile tells the agent to run the size check every turn and to fire this skill on the trigger without asking, at the next safe point (nothing running remotely or in a sub-agent). Opening the new chat stays the user's action. Not for the daemon-level restart, memory or database symptoms of the app process itself (that is science-daemon-ops), and not for compacting a single oversized artifact.
 ---
 
 # Session handoff
 
 A session ends well when the next one starts without re-deriving anything. That
-is the whole job: decide when to rotate, then write down what a fresh agent
-cannot recover on its own.
+is the whole job: decide when to rotate, write down what a fresh agent cannot
+recover on its own, and give the user the message that starts the next chat.
 
 Two things make this worth doing deliberately. Continuity is cheaper than it
 looks — artifacts, durable memory, conda environments and credentials all
@@ -17,28 +17,47 @@ in-memory dataframes, fitted models, session-scoped `pip install`s, and
 anything held only in a variable are gone the moment the session ends. A good
 handoff is mostly an inventory of that gap.
 
-## When to rotate
+## When it runs
 
-**Task boundary is the primary signal, not length.** Rotate when the work
-itself changes: a new topic or dataset, an approach abandoned for a different
-one, a shift from exploration to writing up. Stay put while iterating on the
-same objects, and while remote jobs or sub-agents are still in flight — their
-results land in *this* session.
+**Size fires it automatically, without asking.** The user's profile tells you to
+run the size check below on every user turn and after each deliverable. Any one
+of these is enough:
 
-Size is the secondary signal, and it is measurable rather than a matter of
-feel. Run the self-check below; the thresholds come from observed fold
-behaviour across real sessions, not from guesswork — the fold rate stays at
-0% below 120 messages, sits near 10-25% through the 120-400 range, then jumps
-to 67% at 400-800 and 100% above 800. The jump, not the absolute number, is
-what the table below encodes.
+| signal (this chat's own record) | trigger |
+|---|---|
+| messages | 300 or more |
+| latest context | 280k tokens or more |
+| folds so far | 1 or more |
 
-| message count | folds so far | reading |
-|---|---|---|
-| under ~200 | 0 | healthy — no action |
-| 200-400 | 0-1 | fine; rotate if you are at a task boundary anyway |
-| over ~400 | 1+ | rotation earns its keep — two thirds of sessions this size have already folded |
-| over ~800 | 2+ | rotate at the next boundary; this size reliably folds repeatedly |
-| over ~2000 | 5+ | rotate now — this is where sessions start to slow the app itself |
+After a handoff the trigger re-arms only after another 150 messages or a new
+fold, so a user who keeps working here is not asked every turn. At 2000
+messages or more it is urgent (see Safe point).
+
+The numbers come from the user's own data rather than convention (`references/thresholds.md`, from 324
+frames across the user's projects; descriptive, and fold timing varies widely): the share of frames that had folded is 2% below 120 messages, 6.5% at 120-199, 19% at 200-399, 75% at 400-799 and 100% from 800 (root chats alone: 0 of 37, 0 of 5, 3 of 9, 5 of 7 and 9 of 9); the median latest context of frames that had not folded is 280k tokens
+at 201-400 messages (3.6x the 78k at 25 messages or fewer); and the next step
+costs 1.8-3.3x the first by step 100 (fits to frames that never folded; the range depends on the cache prices assumed). Three hundred messages is the middle of
+the 200-399 band, early enough to write the handoff before most chats have
+folded. Recorded credits per step show no clear trend with length in root chats
+(about +8% per doubling, interval -3% to +20%), so the case for rotating is not
+a measured per-step saving: it is that folds become likely (each costs a
+summarising call plus a cache re-write), that detail from before a fold reaches
+you as summary, and that resuming a large context after a gap of 2 hours or
+more re-writes it to the cache.
+
+**Task boundary is the second signal, and it only offers.** At a clear boundary —
+a new topic or dataset, an approach abandoned for another, a shift from
+exploration to writing up — offer a handoff in one sentence whatever the size.
+Do not interrupt iteration on the same objects.
+
+**Safe point.** Fire at the next safe point: the current deliverable is finished
+and no remote job or sub-agent is still running, because their completion
+notices land in *this* chat, not the next one. If something is in flight, finish
+it first, then run the skill. At 2000 messages or more do not wait: hand off now,
+and list each job id with the command that polls it, since its notice will not
+reach the new chat.
+
+**Sub-agents never run this skill.** Only the user-facing chat does.
 
 Folds are not damage: a fold keeps user messages verbatim and compresses the
 rest, and everything archived stays searchable. But each one means earlier
@@ -46,55 +65,121 @@ detail now reaches you as summary rather than transcript, so precision about
 identifiers, numbers and quoted text degrades — check the archive rather than
 trusting recall once folds are non-zero.
 
-The upper rows have a cost outside your context, too. All of the app's database
-access serializes through one lock, and session hydration re-reads every
-message row under it; a session in the thousands of messages turns each
-hydrate into a multi-hundred-millisecond hold and can end in a watchdog
-respawn of the whole daemon. If the user is *also* reporting app slowness or
-restarts, these are the same problem seen from both ends — see
-`science-daemon-ops`.
+Very large chats may also cost responsiveness outside your context, but this is
+not established. In one daemon log the user pasted on 2026-08-08, four
+transcript reads of about 6,200 rows took 334-791 ms, three of them followed by
+a database-lock hold of similar length; a separate 4,142 ms hold came from an
+insert into the execution log; and a stall watchdog was armed to respawn the
+daemon, with no firing logged. Paged reads of 50 messages took 5-13 ms in chats
+of up to 2,240 messages. If the user is *also* reporting app slowness or
+restarts, see `science-daemon-ops`.
 
-## The size self-check
+## The size check
 
-Run this in the `repl` tool. Substitute this session's frame id (it is in your
-context as **Frame ID**); the query needs nothing else.
+Run this in the `repl` tool on every user turn and after each deliverable. Say
+nothing to the user unless it fires. Substitute this chat's frame id (it is in
+your context as **Frame ID**). `LAST` is the `(messages, folds)` you recorded when
+you last wrote a handoff in this chat; keep it in frame memory
+(`write_memory(entity="frame")`) so it survives compaction.
 
 ```python
-FID = "<this session's frame id>"
+def handoff_trigger(msgs, ctx_used, folds, last_msgs=0, last_folds=0):
+    """Automatic size trigger: any of 300 messages, 280k tokens of latest context, 1 fold.
+
+    Returns {'fire': bool, 'reasons': [...], 'urgent': bool}. After a handoff, pass the
+    (messages, folds) recorded then; the trigger re-arms only after 150 more messages
+    or a new fold. 'urgent' means 2000+ messages: hand off now, even with jobs in flight.
+    """
+    msgs = msgs or 0
+    ctx_used = ctx_used or 0
+    folds = folds or 0
+    reasons = []
+    if msgs >= 300:
+        reasons.append("{} messages (trigger 300)".format(msgs))
+    if ctx_used >= 280000:
+        reasons.append("{}k tokens of latest context (trigger 280k)".format(ctx_used // 1000))
+    if folds >= 1:
+        reasons.append("{} fold(s) so far".format(folds))
+    armed = (not last_msgs) or (msgs - last_msgs >= 150) or (folds > last_folds)
+    return {"fire": bool(reasons) and armed, "reasons": reasons, "urgent": msgs >= 2000}
+
+
+FID = "<this chat's frame id>"
+LAST = (0, 0)
 q = host.query("""
-  SELECT json_extract(context_data,'$._message_count')      AS msgs,
-         json_extract(context_data,'$._user_message_count')  AS user_msgs,
-         json_extract(context_data,'$._context_used')        AS ctx_used,
-         json_extract(context_data,'$._compaction_count')    AS folds,
-         (SELECT COUNT(*) FROM execution_log e WHERE e.frame_id = f.id) AS cells,
+  SELECT json_extract(context_data,'$._message_count'),
+         json_extract(context_data,'$._context_used'),
+         COALESCE(json_extract(context_data,'$._compaction_count'), 0),
+         (SELECT COUNT(*) FROM execution_log e WHERE e.frame_id = f.id),
          (SELECT COUNT(*) FROM artifacts a WHERE a.root_frame_id = f.id
-            AND a.is_ephemeral = 0)                          AS artifacts,
-         total_cost
+            AND a.is_ephemeral = 0)
   FROM frames f WHERE f.id = ?
 """, [FID])
-print(dict(zip(q["columns"], q["rows"][0])))
+msgs, ctx, folds, cells, arts = q["rows"][0]
+print(dict(msgs=msgs, ctx=ctx, folds=folds, cells=cells, artifacts=arts),
+      handoff_trigger(msgs, ctx, folds, *LAST))
 ```
 
-Read `msgs` and `folds` against the table above. `ctx_used` is the weaker
-signal — sessions run past 300k without folding and some fold below 150k, so
-it tells you roughly where you sit in the window, not whether to rotate.
-`cells` and `artifacts` size the handoff you are about to write, not the
-decision.
+`fire` false: carry on, silently. `fire` true: run the steps below. `cells` and
+`artifacts` size the handoff you are about to write, not the decision.
+`ctx` is a snapshot of a sawtooth that each fold resets, which is why folds are
+a trigger of their own and why context alone is the noisier signal. The same
+`handoff_trigger` loads in the python kernel with the skill, for tests; a test
+keeps the two copies identical. If the repl kernel is busy with a background
+cell, run the check in a fresh repl cell; it takes about 10 ms.
 
-Do this at natural checkpoints — after finishing a deliverable, before
-starting something new — rather than mid-thought. It costs one cell.
+## When it fires
 
-## Raising it with the user
+1. **Confirm the safe point.** The current deliverable is finished and nothing
+   is running remotely or in a sub-agent (or the chat is past 2000 messages,
+   in which case list each job id and its polling command in State).
+2. **Checkpoint expensive kernel state.** `save_artifacts(...,
+   checkpoints=[...])` for anything costly to rebuild, with the reload line
+   written next to it; note session-scoped `pip install`s by name.
+3. **Draft the handoff** from `references/handoff-template.md`, using
+   `handoff_artifact_lines(frame_id=...)` and
+   `handoff_kernel_inventory(namespace=globals())`. Fill Objective, State,
+   Decisions, Dead ends, Next steps and Open questions.
+4. **Write the start message last, in two passes.** It needs the handoff's own
+   artifact id, which exists only after the first save: save the handoff once,
+   take the artifact id from the result, build the message with
+   `handoff_start_message(...)`, paste it under "Start message for the next
+   chat" in a fenced block, run `handoff_check(text)` until it returns an empty
+   list, and save again as a new version of the same artifact.
+5. **Record.** Write durable decisions and constraints to memory, and a frame
+   memory note `handoff written at msgs=N folds=K` so the re-arm survives
+   compaction.
+6. **Reply once.** One or two sentences: the numbers that triggered it, the
+   handoff in the artifact tray, anything checkpointed. Then end the reply with
+   the start message in a fenced block; nothing after it. Never say the chat
+   was rotated: the user opens the new one, in this project.
 
-Rotation is the user's call; you are reporting a measurement and an
-opportunity, not asking permission to continue. Keep it to two sentences: the
-numbers, the boundary you have reached, and the offer. "We're at 480 messages
-with one fold, and the calibration work just wrapped — want me to write a
-handoff so the analysis starts clean?" Then let it go if they say no; do not
-raise it again until the next threshold or the next boundary.
+If the user keeps working here, carry on; the trigger re-arms after 150 more
+messages or the next fold. Never treat the handoff as finished work in itself.
 
-Never rotate silently, and never treat the handoff as finished work in itself:
-if they decline, keep working in this session.
+## The start message for the next chat
+
+The user pastes this as the first message of the next chat, so it has to work
+from nothing. Plain text, about 150 words, no artifact markers (a marker or an
+@-mention may not survive copy and paste). It carries:
+
+- the instruction to continue from `HANDOFF-<topic>.md`, with the artifact's
+  filename and full id, so the new chat finds it by id even without an @-mention;
+- the objective and the single next action;
+- up to five artifacts to open first, and what the old kernel lost (which
+  checkpoints to reload);
+- what is pending: jobs or sub-agents with ids, open reviewer findings;
+- up to three things not to redo (decisions and dead ends, one line each);
+- this chat's frame id, with the instruction to search its archive before
+  reusing any identifier, number or quote.
+
+`handoff_start_message(topic, objective, next_action, handoff_artifact_id,
+prev_frame_id, open_first=None, lost_state=None, pending=None,
+do_not_redo=None)` builds it and raises if it exceeds the word cap, so shorten
+the fields rather than the cap: the detail belongs in the handoff file.
+`handoff_check_start(text)` flags a missing file name, a missing id, a marker or
+local path, and length. A worked example is at the end of
+`references/handoff-template.md`.
 
 ## Writing the handoff
 
@@ -106,17 +191,22 @@ no memory of the conversation.
 Read `references/handoff-template.md` for the section-by-section template and
 the reasoning behind each one.
 
-Four helpers load with this skill and do the mechanical parts, so your effort
+Six helpers load with this skill and do the mechanical parts, so your effort
 goes into the judgement the document actually needs:
 
+- `handoff_trigger(msgs, ctx_used, folds, last_msgs, last_folds)` — the size
+  trigger, for tests and for the python kernel.
 - `handoff_artifact_lines(frame_id=...)` — this session's artifacts as
   ready-to-paste bullets with resolvable ids; you fill in each description.
 - `handoff_kernel_inventory(namespace=globals())` — the kernel-state table
   from live variables, with real shapes and sizes; rebuild cost and reload
   path are yours to fill, since nothing can infer them.
+- `handoff_start_message(...)` and `handoff_check_start(text)` — the start
+  message and its check.
 - `handoff_write(topic, body)` — writes `HANDOFF-<topic>.md` to the workspace.
   Saving it as an artifact stays a separate deliberate step.
-- `handoff_check(text)` — flags missing sections, unresolvable links, and
+- `handoff_check(text)` — flags missing sections (the start message is one), a
+  start message that would not work from a fresh chat, unresolvable links, and
   unfilled placeholders. Run it before saving; it catches the failure modes
   that strand a receiving session.
 
@@ -134,7 +224,8 @@ already resolved and resolves for nobody else. When generating handoff text in
 a cell, build markers with `host.artifact_marker(version_id)`;
 `handoff_artifact_lines()` already does, and `handoff_check()` flags a
 pre-resolved path if one slips through. Writing the marker by hand in your
-*response* text is fine — it is only code cells that pre-resolve.
+*response* text is fine — it is only code cells that pre-resolve. The start
+message avoids the problem by carrying plain ids.
 
 **Inventory the kernel loss explicitly.** List what is in memory now, whether
 it is expensive to rebuild, and where the reload comes from. Anything costly
@@ -161,10 +252,10 @@ facts that outlive it. Do not duplicate what is already derivable from
 ## Ending the outgoing session
 
 Checkpoint expensive state, save the handoff, confirm both are in the artifact
-tray, and tell the user in one line how to start the next one. Stay in the same
-project: artifacts and memory are project-scoped, so a new session there finds
-everything by itself, while a new session in a different project has to be
-pointed at it explicitly.
+tray, and end the reply with the start message. Stay in the same project:
+artifacts and memory are project-scoped, so a new chat there finds everything
+by itself, while a new chat in a different project has to be pointed at it
+explicitly (the start message's artifact id does that).
 
 ## Resuming from a handoff
 
@@ -172,12 +263,15 @@ The receiving session inherits more than the document. Artifacts, durable
 memory, conda environments and credentials are already there; the archived
 transcript of the previous session is searchable. The handoff is orientation —
 it tells you which of that inherited material matters and what state was lost.
+The first message is usually the start message from the outgoing chat: take its
+objective and next action as the brief, and the handoff file as the authority.
 
 Work in this order, because each step can invalidate the next:
 
-1. **Read the handoff first, before touching anything.** Objective and Next
-   steps tell you what the session is for; Decisions and Dead ends stop you
-   re-running work that already failed.
+1. **Read the handoff first, before touching anything.** The start message
+   gives its artifact id; `host.artifact_path(<id>)` resolves it to a file you
+   can read. Objective and Next steps tell you what the session is for;
+   Decisions and Dead ends stop you re-running work that already failed.
 2. **Verify the artifacts it names still exist.** `host.artifacts()` — a
    handoff can outlive the files it references, and a version id in the
    document may not be the latest version any more. Check before you build on
@@ -192,6 +286,8 @@ Work in this order, because each step can invalidate the next:
 5. **Say what you inherited and what you skipped**, in a sentence, before
    starting work. The user needs to know the resumption was faithful — and if
    the handoff missed something, that sentence is where they will catch it.
+   Search the previous chat's archive (its frame id is in the start message)
+   before reusing any identifier, number or quote from it.
 
 When the handoff is thin or the objective has moved on since it was written,
 ask rather than infer. A handoff is a snapshot of intent at one moment; the

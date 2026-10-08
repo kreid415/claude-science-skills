@@ -9,6 +9,14 @@ change what it does next is noise competing with the sentences that do.
 
 ## Why each section exists
 
+**Start message for the next chat** — the text the user pastes to open the next
+chat, and the same text the outgoing reply ends with. It names this file and its
+artifact id in plain text (a pasted marker or @-mention may not survive copying),
+states the objective and the single next action, and points at the previous
+chat's archive. About 150 words: it points at this document, it does not replace
+it. Build it with `handoff_start_message(...)` so the length cap and the id
+checks are enforced, and write it last, once the rest is settled.
+
 **Objective** — the user's goal, in their terms, not a description of what you
 did. A new session that knows the destination can choose a different route when
 yours turns out to be blocked; one that only knows your route will follow it
@@ -44,11 +52,16 @@ means the next session can ask them all at once instead of stalling repeatedly.
 
 ## Skeleton
 
-```markdown
+````markdown
 # Handoff: <topic>
 
-**Session:** <date> · <n> messages · <n> folds
+**Session:** <date> · <n> messages · <n> folds · frame <this chat's frame id>
 **Status:** <one sentence: what is done, what is in flight>
+
+## Start message for the next chat
+```
+<output of handoff_start_message(...)>
+```
 
 ## Objective
 <What the user is trying to accomplish, in their terms. 2-3 sentences.>
@@ -58,6 +71,8 @@ means the next session can ask them all at once instead of stalling repeatedly.
 - <Done but unverified: ...>
 - <In progress: ... — next action is ...>
 - <Blocked: ... waiting on ...>
+- <Jobs or sub-agents in flight: id, provider, how to poll — their completion
+  notices land in the old chat, not the new one>
 
 ## Artifacts
 - [<filename>]({{artifact:<version_id>}}) — <what it is, why it matters>
@@ -85,7 +100,7 @@ Session-scoped installs not in the environment: `<package>`, `<package>`.
 
 ## Open questions for the user
 - <Question that blocks a real choice>
-```
+````
 
 ## Worked fragment
 
@@ -113,3 +128,16 @@ Same for state. "Analysis mostly done" tells the next session nothing it can
 act on; "regression fitted and cross-validated; residual diagnostics written
 but not reviewed; the heteroscedasticity question in Open questions is
 unresolved" tells it exactly where to pick up.
+
+## Worked start message
+
+```
+Continue from HANDOFF-calibration.md (artifact id 0b1c2d3e-0000-4000-8000-00000000a001) in this project; read it before doing anything else.
+Objective: finish the dose-response calibration and decide the exclusion rule for the 14 qc_fail samples.
+Next action: re-fit with alpha=0.3 in fit_model.py and compare AIC against baseline_fit.csv.
+Open first: HANDOFF-calibration.md; baseline_fit.csv; qc_flags.csv; merged.parquet (checkpoint).
+Lost with the old kernel: df_merged and model; reload from merged.parquet and model.pkl.
+Pending: sub-agent "QC review" still running; open finding on the residual plot.
+Do not redo: alpha=0.1 (underfit); the log-link model (diverged).
+Before reusing any identifier, number or quote from the previous chat (frame 0b1c2d3e-0000-4000-8000-00000000b002), search its archive.
+```
