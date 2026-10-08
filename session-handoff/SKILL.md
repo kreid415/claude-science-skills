@@ -50,12 +50,30 @@ a new topic or dataset, an approach abandoned for another, a shift from
 exploration to writing up — offer a handoff in one sentence whatever the size.
 Do not interrupt iteration on the same objects.
 
+**Wave boundary is the third signal, and it also only offers.** When a batch of
+runs has just finished (no job of this chat is live in the compute ledger, no
+sub-agent is running, no status-board unit is running or pending, no registered
+watcher is live) the chat holds no live state, so it is the cheapest moment to
+rotate. The per-turn check below computes this (`quiet`) and `offer`: quiet, a
+job of this chat ended after the last offer, and 150 or more messages (half the
+size trigger; in the user's frames 6.5% had folded at 120-199 messages). Offer
+once in one sentence, then record `OFFERED_MS` (epoch ms, now) in frame memory.
+
 **Safe point.** Fire at the next safe point: the current deliverable is finished
-and no remote job or sub-agent is still running, because their completion
-notices land in *this* chat, not the next one. If something is in flight, finish
-it first, then run the skill. At 2000 messages or more do not wait: hand off now,
-and list each job id with the command that polls it, since its notice will not
-reach the new chat.
+and the check reports `quiet`, because completion notices and sub-agent results
+land in *this* chat, not the next one, and a new chat cannot `attach_job` a job
+this chat owns. If something is live, finish it first, then run the skill. At
+2000 messages or more do not wait: hand off now and put the run-state table
+(`handoff_run_state_rows`) in State: host, job and watcher ids, and a read-only
+command any chat can run there.
+
+**Make runs visible to the check.** Launch local waves with `submit_job` on
+`ssh:cs-local`, not `nohup`, so they appear in the ledger. Run long jobs under
+`job-watch`: its state directory gives any chat the job's status
+(`jw.py status --state DIR`). A watcher started outside a ledger job goes into
+`WATCHERS` in frame memory (`{'id', 'host', 'state_dir'}`) until its report line
+says it ended; a status board for a run in flight goes into `BOARDS` (workspace
+path of `status_board.json`).
 
 **Sub-agents never run this skill.** Only the user-facing chat does.
 
@@ -118,21 +136,79 @@ q = host.query("""
 msgs, ctx, folds, cells, arts = q["rows"][0]
 print(dict(msgs=msgs, ctx=ctx, folds=folds, cells=cells, artifacts=arts),
       handoff_trigger(msgs, ctx, folds, *LAST))
+
+# ---- run state and the wave boundary ----
+def handoff_quiet(jobs, children=0, boards=(), watchers=()):
+    """Wave boundary: True when nothing is live that a new chat would lose.
+
+    jobs: compute-ledger rows of this chat, dicts with 'job_id' and 'state' (any state not in
+    HANDOFF_JOB_TERMINAL counts as live). children: number of running sub-agents. boards:
+    status_board.json contents ({'board': {...}} or the board itself); units 'running' or
+    'pending' are live. watchers: job-watch watchers outside any ledger job, dicts with 'id' and
+    optional 'status' (state.json 'status'); live unless status is known and not 'running'.
+    Returns {'quiet', 'live_jobs', 'live_units', 'live_watchers', 'children', 'reasons'}.
+    """
+    live_jobs = [j["job_id"] for j in jobs if str(j.get("state", "")).lower() not in HANDOFF_JOB_TERMINAL]
+    live_units = 0
+    for b in boards:
+        t = (b.get("board", b) or {}).get("totals", {})
+        live_units += int(t.get("running", 0)) + int(t.get("pending", 0))
+    live_w = [w["id"] for w in watchers if w.get("status") in (None, "running")]
+    children = int(children or 0)
+    reasons = []
+    if live_jobs:
+        reasons.append("{} live ledger job(s)".format(len(live_jobs)))
+    if children:
+        reasons.append("{} running sub-agent(s)".format(children))
+    if live_units:
+        reasons.append("{} board unit(s) running or pending".format(live_units))
+    if live_w:
+        reasons.append("{} job-watch watcher(s) outside the ledger".format(len(live_w)))
+    return {"quiet": not reasons, "live_jobs": live_jobs, "live_units": live_units,
+            "live_watchers": live_w, "children": children, "reasons": reasons}
+
+
+def handoff_wave_offer(quiet, msgs, last_end_ms, offered_ms=0, min_msgs=150):
+    """Offer a handoff once per finished wave.
+
+    True when nothing is live (quiet), a job of this chat ended after the last offer
+    (last_end_ms > offered_ms, epoch ms, from compute_usage.ended_at) and the chat has at least
+    min_msgs messages. This only offers; the size trigger is what fires automatically.
+    """
+    return bool(quiet and (msgs or 0) >= min_msgs and last_end_ms and last_end_ms > (offered_ms or 0))
+
+
+import json, os
+HANDOFF_JOB_TERMINAL = ("done", "succeeded", "failed", "cancelled", "timed_out")
+OFFERED_MS = 0   # epoch ms of the last wave offer or handoff (frame memory)
+BOARDS = []      # status_board.json paths for runs in flight (frame memory)
+WATCHERS = []    # job-watch watchers outside any ledger job (frame memory)
+cols = ("job_id", "provider", "state", "remote_workdir", "remote_handle", "ended_at")
+jobs = [dict(zip(cols, r)) for r in host.query(
+    "SELECT " + ", ".join(cols) + " FROM compute_usage WHERE root_frame_id = ?", [FID])["rows"]]
+boards = [json.load(open(p)) for p in BOARDS if os.path.exists(p)]
+qt = handoff_quiet(jobs, host.children()["count"], boards, WATCHERS)
+last_end = max([j["ended_at"] or 0 for j in jobs] or [0])
+print(qt, "offer:", handoff_wave_offer(qt["quiet"], msgs, last_end, OFFERED_MS))
 ```
 
 `fire` false: carry on, silently. `fire` true: run the steps below. `cells` and
 `artifacts` size the handoff you are about to write, not the decision.
 `ctx` is a snapshot of a sawtooth that each fold resets, which is why folds are
 a trigger of their own and why context alone is the noisier signal. The same
-`handoff_trigger` loads in the python kernel with the skill, for tests; a test
-keeps the two copies identical. If the repl kernel is busy with a background
+`handoff_trigger`, `handoff_quiet` and `handoff_wave_offer` load in the python
+kernel with the skill, for tests; `tests/session-handoff_tests.py` keeps the
+copies identical. `offer` true: offer a handoff in one sentence (see Wave
+boundary) unless `fire` is also true. If the repl kernel is busy with a background
 cell, run the check in a fresh repl cell; it takes about 10 ms.
 
 ## When it fires
 
-1. **Confirm the safe point.** The current deliverable is finished and nothing
-   is running remotely or in a sub-agent (or the chat is past 2000 messages,
-   in which case list each job id and its polling command in State).
+1. **Confirm the safe point.** The current deliverable is finished and the
+   check reports `quiet` (or the chat is past 2000 messages: write the repl's
+   `jobs`, `host.children()["running_children"]`, `WATCHERS` and `BOARDS` to
+   `./handoff/run_state.json` and paste `handoff_run_state_rows(...)` into
+   State).
 2. **Checkpoint expensive kernel state.** `save_artifacts(...,
    checkpoints=[...])` for anything costly to rebuild, with the reload line
    written next to it; note session-scoped `pip install`s by name.
@@ -191,7 +267,7 @@ no memory of the conversation.
 Read `references/handoff-template.md` for the section-by-section template and
 the reasoning behind each one.
 
-Six helpers load with this skill and do the mechanical parts, so your effort
+Nine helpers load with this skill and do the mechanical parts, so your effort
 goes into the judgement the document actually needs:
 
 - `handoff_trigger(msgs, ctx_used, folds, last_msgs, last_folds)` — the size
@@ -203,6 +279,12 @@ goes into the judgement the document actually needs:
   path are yours to fill, since nothing can infer them.
 - `handoff_start_message(...)` and `handoff_check_start(text)` — the start
   message and its check.
+- `handoff_quiet(jobs, children, boards, watchers)` and
+  `handoff_wave_offer(quiet, msgs, last_end_ms, offered_ms)` — the wave
+  boundary, inlined in the per-turn check.
+- `handoff_run_state_rows(jobs, watchers, boards, children)` — the live-run
+  table for State: host, ids and a read-only check command per row (`sacct -j`
+  for SLURM, `ps -g` for local process groups, `jw.py status` for watchers).
 - `handoff_write(topic, body)` — writes `HANDOFF-<topic>.md` to the workspace.
   Saving it as an artifact stays a separate deliberate step.
 - `handoff_check(text)` — flags missing sections (the start message is one), a

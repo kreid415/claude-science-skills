@@ -71,8 +71,9 @@ means the next session can ask them all at once instead of stalling repeatedly.
 - <Done but unverified: ...>
 - <In progress: ... — next action is ...>
 - <Blocked: ... waiting on ...>
-- <Jobs or sub-agents in flight: id, provider, how to poll — their completion
-  notices land in the old chat, not the new one>
+- <Live runs: paste `handoff_run_state_rows(...)` (host, job/watcher ids, a
+  read-only check command per row). Completion notices and sub-agent results
+  land in the old chat, and the new chat cannot attach_job these jobs>
 
 ## Artifacts
 - [<filename>]({{artifact:<version_id>}}) — <what it is, why it matters>

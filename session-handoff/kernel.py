@@ -210,3 +210,100 @@ def handoff_check(text):
     if left:
         problems.append("{} unfilled placeholder(s), first: {}".format(len(left), left[0]))
     return problems
+
+
+# ---- run state and the wave boundary (added 2026-10-08) -------------------------------
+# The per-turn repl check inlines handoff_quiet and handoff_wave_offer; a test keeps the copies
+# identical. handoff_run_state_rows runs in the python kernel when a handoff is written.
+
+HANDOFF_JOB_TERMINAL = ("done", "succeeded", "failed", "cancelled", "timed_out")
+
+
+def handoff_quiet(jobs, children=0, boards=(), watchers=()):
+    """Wave boundary: True when nothing is live that a new chat would lose.
+
+    jobs: compute-ledger rows of this chat, dicts with 'job_id' and 'state' (any state not in
+    HANDOFF_JOB_TERMINAL counts as live). children: number of running sub-agents. boards:
+    status_board.json contents ({'board': {...}} or the board itself); units 'running' or
+    'pending' are live. watchers: job-watch watchers outside any ledger job, dicts with 'id' and
+    optional 'status' (state.json 'status'); live unless status is known and not 'running'.
+    Returns {'quiet', 'live_jobs', 'live_units', 'live_watchers', 'children', 'reasons'}.
+    """
+    live_jobs = [j["job_id"] for j in jobs if str(j.get("state", "")).lower() not in HANDOFF_JOB_TERMINAL]
+    live_units = 0
+    for b in boards:
+        t = (b.get("board", b) or {}).get("totals", {})
+        live_units += int(t.get("running", 0)) + int(t.get("pending", 0))
+    live_w = [w["id"] for w in watchers if w.get("status") in (None, "running")]
+    children = int(children or 0)
+    reasons = []
+    if live_jobs:
+        reasons.append("{} live ledger job(s)".format(len(live_jobs)))
+    if children:
+        reasons.append("{} running sub-agent(s)".format(children))
+    if live_units:
+        reasons.append("{} board unit(s) running or pending".format(live_units))
+    if live_w:
+        reasons.append("{} job-watch watcher(s) outside the ledger".format(len(live_w)))
+    return {"quiet": not reasons, "live_jobs": live_jobs, "live_units": live_units,
+            "live_watchers": live_w, "children": children, "reasons": reasons}
+
+
+def handoff_wave_offer(quiet, msgs, last_end_ms, offered_ms=0, min_msgs=150):
+    """Offer a handoff once per finished wave.
+
+    True when nothing is live (quiet), a job of this chat ended after the last offer
+    (last_end_ms > offered_ms, epoch ms, from compute_usage.ended_at) and the chat has at least
+    min_msgs messages. This only offers; the size trigger is what fires automatically.
+    """
+    return bool(quiet and (msgs or 0) >= min_msgs and last_end_ms and last_end_ms > (offered_ms or 0))
+
+
+def _handoff_check_cmd(job):
+    import json as _json
+    h = job.get("remote_handle")
+    try:
+        h = _json.loads(h) if isinstance(h, str) else (h or {})
+    except ValueError:
+        h = {}
+    wd = job.get("remote_workdir") or h.get("workdir") or "?"
+    if h.get("kind") == "slurm" and h.get("jobId"):
+        return "sacct -X -j {} -o JobID,State,Elapsed,Timelimit; ls {}".format(h["jobId"], wd)
+    if h.get("pgid"):
+        return "ps -o pid,stat,etime,cmd -g {}; ls {}".format(h["pgid"], wd)
+    return "ls -lt {} | head".format(wd)
+
+
+def handoff_run_state_rows(jobs, watchers=(), boards=(), children=()):
+    """Markdown table of everything live, for the handoff's State section.
+
+    A new chat cannot attach_job a job owned by this chat, and completion notices land here, so
+    each row names the host and a read-only command any chat can run with call_command on it.
+    jobs: ledger rows (job_id, provider, state, remote_workdir, remote_handle). watchers: dicts
+    with 'id', 'host', 'state_dir', optional 'status'. boards: (path, status_board.json dict)
+    pairs. children: dicts with 'frame_id' and 'name'. Returns '' when nothing is live.
+    """
+    rows = []
+    for j in jobs:
+        if str(j.get("state", "")).lower() in HANDOFF_JOB_TERMINAL:
+            continue
+        rows.append("| job | `{}` | {} | {} | `{}` |".format(j["job_id"], j.get("provider", "?"), j.get("state", "?"),
+                                                           _handoff_check_cmd(j)))
+    for w in watchers:
+        if w.get("status") not in (None, "running"):
+            continue
+        rows.append("| job-watch | `{}` | {} | {} | `python3 ~/job-watch/jw.py status --state {}` (resume: `watch --state {}`) |".format(
+            w["id"], w.get("host", "?"), w.get("status") or "unknown", w["state_dir"], w["state_dir"]))
+    for path, b in boards:
+        bd = b.get("board", b)
+        t = bd.get("totals", {})
+        live = int(t.get("running", 0)) + int(t.get("pending", 0))
+        if live:
+            rows.append("| status board | `{}` | - | {} of {} running/pending (generated {}) | rebuild the board from its manifest |".format(
+                path, live, bd.get("n_units", "?"), bd.get("generated_at", "?")))
+    for c in children:
+        rows.append("| sub-agent | `{}` | - | running | its result returns to the old chat only; collect it there or re-run |".format(
+            c.get("frame_id") or c.get("name")))
+    if not rows:
+        return ""
+    return "\n".join(["| kind | id | host | state | check from any chat |", "|---|---|---|---|---|"] + rows)
