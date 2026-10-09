@@ -57,7 +57,7 @@ Default profiles (`pd_request(..., profile="default")`): `run` and `triage` use 
 - Large results come back as artifacts referenced by version id; keep `summary` short.
 - End a job command with the watcher (`jw.py watch ...`), not with a later command: `watch ...; cat result.txt` makes the job's exit code that of `cat` (live test 2026-10-08: the child had to report the watcher's exit from state.json instead). Put follow-up reads in the acceptance checks.
 - A profile loads only skills in its catalog. CLUSTER_OPS carries job-watch and cluster-rules (attached 2026-10-08); check `host.agents.get(profile)['skillNames']` before a brief relies on a skill.
-- CLUSTER_OPS's system prompt asks the user to confirm cluster, partition, account, size and walltime before every cluster submit, so a cluster `run` phase usually pauses on that question once per submit (the first JHPCE child asked, the next two did not). The coordinator cannot answer it.
+- CLUSTER_OPS's system prompt asks the user to confirm cluster, partition, account, size and walltime before every cluster submit, so a cluster `run` or `triage` phase pauses on one `ask_user` card per submit, resubmissions included (user rule 2026-10-08; before the prompt edit 1 of 3 children asked, after it 2 of 2 asked once). Plan for the wait: the coordinator cannot answer it, and a child that gets No returns `needs_human`. The coordinator cannot answer it.
 
 Tests: `tests/phase-delegation_tests.py` (stdlib): brief validation, marker construction, schema shape, and audit of completed, failed, prose-only, undeclared, partial and live-job results.
 
