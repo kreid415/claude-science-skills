@@ -66,8 +66,10 @@ context, or the first fold; thresholds from measured session data, in
 job, sub-agent, status-board unit or watcher; a job ended since the last offer;
 150+ messages) only offer. The handoff's run-state table lists each live job and
 watcher with its host and a read-only check any chat can run (`sacct -j`,
-`ps -g`, `jw.py status`). Tests: `tests/session-handoff_tests.py`, including
-identity of the copies inlined in the per-turn repl check.
+`ps -g`, `jw.py status`). The start message opens with `Chat name: <name>`, the
+name of the first chat in the handoff chain, so every chat in the chain keeps
+it. Tests: `tests/session-handoff_tests.py`, including identity of the copies
+inlined in the per-turn repl check.
 
 ### `paper-outline`
 Maintain a living, citation-backed outline of the paper a project is building

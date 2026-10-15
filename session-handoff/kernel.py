@@ -36,13 +36,14 @@ def handoff_trigger(msgs, ctx_used, folds, last_msgs=0, last_folds=0):
 
 def handoff_start_message(topic, objective, next_action, handoff_artifact_id, prev_frame_id,
                           open_first=None, lost_state=None, pending=None, do_not_redo=None,
-                          max_words=150):
+                          max_words=150, chat_name=None):
     """Ready-to-paste first message for the next chat (plain text, no artifact markers).
 
     Names the handoff file and its full artifact id so the new chat can find it by id even
     without an @-mention, and the previous chat's frame id so its archive can be searched.
-    Raises ValueError when over max_words: shorten the fields, the detail belongs in the
-    handoff file.
+    chat_name (from the repl's handoff_chat_name) goes first as 'Chat name: ...', because the
+    app names a new chat from its first message. Raises ValueError when over max_words:
+    shorten the fields, the detail belongs in the handoff file.
     """
     import re
     slug = re.sub(r"[^a-z0-9]+", "-", str(topic).lower()).strip("-") or "session"
@@ -52,6 +53,8 @@ def handoff_start_message(topic, objective, next_action, handoff_artifact_id, pr
         "Objective: {}".format(objective),
         "Next action: {}".format(next_action),
     ]
+    if chat_name:
+        lines.insert(0, "Chat name: {}".format(chat_name))
     if open_first:
         lines.append("Open first: " + "; ".join(open_first[:5]))
     if lost_state:
@@ -70,9 +73,11 @@ def handoff_start_message(topic, objective, next_action, handoff_artifact_id, pr
 
 
 def handoff_check_start(text, max_words=170):
-    """Problems that would strand the next chat: missing file name or ids, markers, length."""
+    """Problems that would strand the next chat: no chat name, missing file name or ids, markers, length."""
     import re
     problems = []
+    if not re.match(r"\s*Chat name: \S", text):
+        problems.append("first line is not 'Chat name: <chain's original chat name>' (handoff_chat_name)")
     if not re.search(r"HANDOFF-[a-z0-9-]+\.md", text):
         problems.append("does not name the HANDOFF-<topic>.md file")
     ids = set(re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", text))

@@ -101,5 +101,45 @@ def _():
     assert "ls -lt /w | head" in r([{"job_id": "x", "state": "running", "remote_workdir": "/w", "remote_handle": "not json"}])
 
 
+@t("start message opens with 'Chat name: ...' when chat_name is given; the check flags a missing one")
+def _():
+    a, b = "0b1c2d3e-0000-4000-8000-00000000a001", "0b1c2d3e-0000-4000-8000-00000000b002"
+    s = K["handoff_start_message"]("calibration", "finish it", "re-fit", a, b, chat_name="Dose-Response Calibration")
+    assert s.splitlines()[0] == "Chat name: Dose-Response Calibration" and K["handoff_check_start"](s) == [], s
+    p = K["handoff_check_start"](K["handoff_start_message"]("calibration", "finish it", "re-fit", a, b))
+    assert len(p) == 1 and "Chat name" in p[0], p
+    assert K["handoff_check_start"]("Chat name: \n" + s.split("\n", 1)[1]) == p  # a name is required
+
+
+@t("chat name: walks the chain back to its first chat; stops at a 'Chat name:' line, a deleted chat or max_hops")
+def _():
+    import tempfile
+    block = SKILL.split("## The start message for the next chat", 1)[1].split("```python", 1)[1].split("```", 1)[0]
+    U = lambda c: c * 8 + "-0000-4000-8000-000000000000"
+    start = "Continue from HANDOFF-x.md (artifact id {}) in this project.\nBefore reusing any identifier, " \
+            "number or quote from the previous chat (frame {}), search its archive."
+    db = {U("a"): ("Original Name", "should it open with Chat name: Foo?"),            # first chat; mid-line mention ignored
+          U("b"): ("Auto Title B", start.format(U("0"), U("a"))),                      # start message without the line
+          U("c"): ("Auto Title C", "Chat name: Original Name \n" + start.format(U("0"), U("e"))),  # line kept after deletes
+          U("d"): ("Auto Title D", start.format(U("0"), U("e"))),                      # previous chat deleted
+          U("f"): ("Loop", start.format(U("0"), U("f")))}
+
+    class H:
+        def query(self, sql, params=None, scope="project"):
+            assert scope == "global" and "FROM frames" in sql
+            return {"rows": [list(db[params[0]])] if params[0] in db else []}
+    g = {"host": H(), "print": lambda *a: None}
+    cwd = os.getcwd()
+    os.chdir(tempfile.mkdtemp())
+    try:
+        exec(block.replace('"<this chat\'s frame id>"', repr(U("b"))), g)
+        assert json.load(open("handoff/chat_name.json")) == {"chat_name": "Original Name"}
+    finally:
+        os.chdir(cwd)
+    f = g["handoff_chat_name"]
+    assert f(U("c")) == "Original Name" and f(U("a")) == "Original Name" and f(U("d")) == "Auto Title D"
+    assert f(U("f"), max_hops=3) == "Loop" and f(U("9")) is None
+
+
 print("all session-handoff tests passed" if all(OK) else "SOME session-handoff TESTS FAILED")
 raise SystemExit(0 if all(OK) else 1)

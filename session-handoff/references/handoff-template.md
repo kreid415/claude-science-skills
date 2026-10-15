@@ -10,7 +10,9 @@ change what it does next is noise competing with the sentences that do.
 ## Why each section exists
 
 **Start message for the next chat** — the text the user pastes to open the next
-chat, and the same text the outgoing reply ends with. It names this file and its
+chat, and the same text the outgoing reply ends with. Its first line is
+`Chat name: <name>`, the name of the first chat in the handoff chain, because
+the app names the new chat from its first message. It names this file and its
 artifact id in plain text (a pasted marker or @-mention may not survive copying),
 states the objective and the single next action, and points at the previous
 chat's archive. About 150 words: it points at this document, it does not replace
@@ -133,6 +135,7 @@ unresolved" tells it exactly where to pick up.
 ## Worked start message
 
 ```
+Chat name: Dose-Response Calibration
 Continue from HANDOFF-calibration.md (artifact id 0b1c2d3e-0000-4000-8000-00000000a001) in this project; read it before doing anything else.
 Objective: finish the dose-response calibration and decide the exclusion rule for the 14 qc_fail samples.
 Next action: re-fit with alpha=0.3 in fit_model.py and compare AIC against baseline_fit.csv.

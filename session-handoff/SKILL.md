@@ -218,10 +218,11 @@ cell, run the check in a fresh repl cell; it takes about 10 ms.
    Decisions, Dead ends, Next steps and Open questions.
 4. **Write the start message last, in two passes.** It needs the handoff's own
    artifact id, which exists only after the first save: save the handoff once,
-   take the artifact id from the result, build the message with
-   `handoff_start_message(...)`, paste it under "Start message for the next
-   chat" in a fenced block, run `handoff_check(text)` until it returns an empty
-   list, and save again as a new version of the same artifact.
+   take the artifact id from the result, run the chat-name cell (under "The
+   start message for the next chat"), build the message with
+   `handoff_start_message(..., chat_name=...)`, paste it under "Start message
+   for the next chat" in a fenced block, run `handoff_check(text)` until it
+   returns an empty list, and save again as a new version of the same artifact.
 5. **Record.** Write durable decisions and constraints to memory, and a frame
    memory note `handoff written at msgs=N folds=K` so the re-arm survives
    compaction.
@@ -239,6 +240,8 @@ The user pastes this as the first message of the next chat, so it has to work
 from nothing. Plain text, about 150 words, no artifact markers (a marker or an
 @-mention may not survive copy and paste). It carries:
 
+- `Chat name: <name>` as the first line: the name of the first chat in the
+  handoff chain, so every chat in the chain keeps that name (see below);
 - the instruction to continue from `HANDOFF-<topic>.md`, with the artifact's
   filename and full id, so the new chat finds it by id even without an @-mention;
 - the objective and the single next action;
@@ -251,11 +254,57 @@ from nothing. Plain text, about 150 words, no artifact markers (a marker or an
 
 `handoff_start_message(topic, objective, next_action, handoff_artifact_id,
 prev_frame_id, open_first=None, lost_state=None, pending=None,
-do_not_redo=None)` builds it and raises if it exceeds the word cap, so shorten
-the fields rather than the cap: the detail belongs in the handoff file.
-`handoff_check_start(text)` flags a missing file name, a missing id, a marker or
-local path, and length. A worked example is at the end of
-`references/handoff-template.md`.
+do_not_redo=None, chat_name=None)` builds it and raises if it exceeds the word
+cap, so shorten the fields rather than the cap: the detail belongs in the
+handoff file. `handoff_check_start(text)` flags a missing `Chat name:` first
+line, a missing file name, a missing id, a marker or local path, and length. A
+worked example is at the end of `references/handoff-template.md`.
+
+**The chat name.** The app names each new chat from its first message, and
+the agent cannot rename a chat, so without this line every handoff gives the
+chain a new name. `handoff_chat_name` finds the original: it walks back
+through each start message's "previous chat (frame <id>)" to the first chat
+of the chain, and stops early at a `Chat name:` line, which this skill writes
+and which wins over a later title. If an older chat was deleted it keeps the
+oldest name found. Run it in the `repl` tool (it needs `host.query`):
+
+```python
+import json, os, re
+
+def handoff_chat_name(frame_id, max_hops=100):
+    """Name of the first chat in this chat's handoff chain; every chat in the chain keeps it.
+
+    Walks back through each start message's 'previous chat (frame <id>)'. Stops at a
+    'Chat name:' line, at a chat not started from a handoff, or at a deleted chat (then
+    the oldest name found).
+    """
+    name = None
+    for _ in range(max_hops):
+        rows = host.query("SELECT name, json_extract(input_data, '$.request') FROM frames WHERE id = ?",
+                          [frame_id], scope="global")["rows"]
+        if not rows:
+            break
+        name, first = rows[0][0], rows[0][1] or ""
+        m = re.search(r"^Chat name: *(.*\S)", first, re.M)
+        if m:
+            return m.group(1)
+        prev = re.search(r"previous chat \(frame ([0-9a-f-]{36})\)", first)
+        if not prev:
+            break
+        frame_id = prev.group(1)
+    return name
+
+
+FID = "<this chat's frame id>"
+os.makedirs("handoff", exist_ok=True)
+json.dump({"chat_name": handoff_chat_name(FID)}, open("handoff/chat_name.json", "w"))
+print(open("handoff/chat_name.json").read())
+```
+
+Then, in the python kernel, pass
+`chat_name=json.load(open("handoff/chat_name.json"))["chat_name"]` to
+`handoff_start_message`. The app's automatic title may still differ from the
+line; the receiving chat checks (Resuming, step 5).
 
 ## Writing the handoff
 
@@ -369,7 +418,12 @@ Work in this order, because each step can invalidate the next:
    starting work. The user needs to know the resumption was faithful — and if
    the handoff missed something, that sentence is where they will catch it.
    Search the previous chat's archive (its frame id is in the start message)
-   before reusing any identifier, number or quote from it.
+   before reusing any identifier, number or quote from it. If the start message
+   opens with `Chat name: <name>`, read this chat's title in the repl
+   (`host.query("SELECT name FROM frames WHERE id = ?", [<this chat's frame
+   id>])`); if it differs, say in the same sentence that this chat should be
+   renamed to `<name>` to keep the chain under one name. You cannot rename a
+   chat yourself.
 
 When the handoff is thin or the objective has moved on since it was written,
 ask rather than infer. A handoff is a snapshot of intent at one moment; the
