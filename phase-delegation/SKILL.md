@@ -34,7 +34,7 @@ exec(open(PD).read())
 7. **Validate with a different sub-agent.** After `run`, a `validate` phase gets the harvested artifacts and the manifest; it does not reuse the runner's conclusions.
 8. **Report** through claim-gate: values read back from the returned artifacts, scoped by `limits`.
 
-Default profiles (`pd_request(..., profile="default")`): `run` and `triage` use CLUSTER_OPS; `validate` and `analyze` use the domain specialist for the data (e.g. SC_ANALYST, ML_ANALYST; RIGOR_REVIEWER for a rigor review), passed explicitly.
+Default profiles (`pd_request(..., profile="default")`): `run` and `triage` use CLUSTER_OPS (stays in Claude Science). `validate` and `analyze` go to the domain specialist for the data (e.g. SC_ANALYST, ML_ANALYST; RIGOR_REVIEWER for a rigor review) as a Claude Code agent through cli-subagents: `python3 ~/cli-subagents/agent_task.py --engine claude --agent <NAME> ...` (cli-subagents skill); pass `profile=<NAME>` to `pd_request` and use the Claude Science profile only if the claude canary fails.
 
 ## Contract for the child (written into every brief)
 
