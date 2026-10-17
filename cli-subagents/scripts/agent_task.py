@@ -4,6 +4,7 @@
   --model M --effort E   codex: -m / -c model_reasoning_effort; claude: --model / --effort (low|medium|high|xhigh|max)
   --allowed-tools CSV --permission-mode dontAsk|acceptEdits|plan   claude only; overrides the default allow-list
   --schema FILE   JSON schema for the declaration's `result`; sent via the CLI's native option (codex --output-schema, claude --json-schema)
+  --agent NAME   claude only: `claude --agent NAME` (a ~/.claude/agents profile)   --add-dir PATH (repeatable)   extra folders the agent may read (claude --add-dir; codex: only with workspace-write, where it becomes writable; a read-only codex sandbox already reads everywhere)
   --resume SESSION_ID   follow-up message in an earlier session (same workdir; implies --in-place)
   --out DIR (default ~/cli-subagents/runs/<ts>_<engine>_<pid>)  --timeout S (3600)  --in-place  --max-mb 500
 Workdir: a clean git repo is used in place; anything else (plain directory, dirty repo) is first copied to <out>/work, baselined with a git
@@ -66,11 +67,14 @@ def main():
     ap = argparse.ArgumentParser(); ap.add_argument("task"); ap.add_argument("--engine", required=True, choices=["codex", "claude"]); ap.add_argument("--workdir", required=True)
     ap.add_argument("--access", default="workspace-write", choices=["read-only", "workspace-write"]); ap.add_argument("--model"); ap.add_argument("--effort")
     ap.add_argument("--allowed-tools"); ap.add_argument("--permission-mode", default="dontAsk"); ap.add_argument("--schema"); ap.add_argument("--resume")
+    ap.add_argument("--agent"); ap.add_argument("--add-dir", action="append", default=[])
     ap.add_argument("--out"); ap.add_argument("--timeout", type=int, default=3600); ap.add_argument("--in-place", action="store_true"); ap.add_argument("--max-mb", type=float, default=500)
     ap.add_argument("--min-5h", type=float, default=2); ap.add_argument("--min-week", type=float, default=1)
     a = ap.parse_args()
     wd0 = os.path.abspath(a.workdir)
     if not os.path.isdir(wd0): print(json.dumps({"error": "workdir missing"})); return 2
+    add_dirs = [os.path.abspath(os.path.expanduser(d)) for d in a.add_dir]
+    if [d for d in add_dirs if not os.path.isdir(d)]: print(json.dumps({"error": "--add-dir not a directory: " + ", ".join(d for d in add_dirs if not os.path.isdir(d))})); return 2
     started = datetime.datetime.now()
     out = os.path.abspath(a.out or os.path.expanduser(f"~/cli-subagents/runs/{started:%Y%m%dT%H%M%S}_{a.engine}_{os.getpid()}")); os.makedirs(out, exist_ok=True)
     user_schema = json.load(open(a.schema)) if a.schema else None
@@ -78,10 +82,10 @@ def main():
     try:
         wd, scratch = prepare_workdir(wd0, out, a.in_place or bool(a.resume), a.max_mb)
         rc, rec = agent_run.run(a.engine, prompt, wd, out, a.access, a.model, a.effort, a.timeout, a.resume, wrapper_schema(user_schema) if user_schema else None,
-                                a.allowed_tools, a.permission_mode, a.min_5h, a.min_week)
+                                a.allowed_tools, a.permission_mode, a.min_5h, a.min_week, a.agent, add_dirs)
     except ValueError as e: print(json.dumps({"error": str(e)})); return 2
     res = {"engine": a.engine, "mode": "task", "status": "GATED", "exit_code": rc, "workdir_requested": wd0, "workdir_used": wd, "scratch_copy": scratch, "access": a.access,
-           "resumed_from": a.resume, "run_dir": out, "task_sha256": hashlib.sha256(task.encode()).hexdigest(), "started": int(started.timestamp())}
+           "resumed_from": a.resume, "agent": a.agent, "add_dirs": add_dirs, "run_dir": out, "task_sha256": hashlib.sha256(task.encode()).hexdigest(), "started": int(started.timestamp())}
     if rc == 10: res["route"] = rec
     else:
         res.update({k: rec[k] for k in ("cli_version", "model", "effort", "session_id", "tokens", "cost_usd_reported", "permission_denials", "rate_limit_events", "usage_report", "usage_before", "usage_after", "git", "final_message", "seconds")})
@@ -90,7 +94,7 @@ def main():
             res["declaration"], res["declaration_problem"] = parse_declaration(rec["final_message"], rec["structured_output"], user_schema)
             if res["declaration"] is None: res["status"], res["exit_code"], rc = "UNDECLARED", 13, 13
     open(os.path.join(out, "result.json"), "w").write(json.dumps(res, indent=1))
-    agent_ledger.append({"id": os.path.basename(out), "engine": a.engine, "mode": "task", "status": res["status"], "exit_code": rc, "attempts": 1, "model": res.get("model"), "effort": res.get("effort"),
+    agent_ledger.append({"id": os.path.basename(out), "engine": a.engine, "mode": "task", "agent": a.agent, "status": res["status"], "exit_code": rc, "attempts": 1, "model": res.get("model"), "effort": res.get("effort"),
                          "session_id": res.get("session_id"), "workdir": wd0, "task_sha256": res["task_sha256"], "tokens": res.get("tokens"), "started": res["started"],
                          "seconds": res.get("seconds"), "run_dir": out, "outcome_check": None})
     print(json.dumps({"status": res["status"], "result_json": os.path.join(out, "result.json"), "session_id": res.get("session_id"), "usage_report": res.get("usage_report")}))

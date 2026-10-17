@@ -1,0 +1,2 @@
+{"engine": "claude", "agent": "LIT_REVIEWER", "task": "~/cli-subagents/jobs/literature-watch.task.md", "workdir": "~/agent-inbox/literature-watch/work", "in_place": true, "access": "read-only",
+ "allowed_tools": "Read,Glob,Grep,WebSearch,WebFetch", "timeout": 3600}

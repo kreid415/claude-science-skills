@@ -15,10 +15,12 @@ emit({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "rate
 if "slugify" in prompt:
     open("slug.py", "w").write("import re, unicodedata\ndef slugify(s):\n    s = unicodedata.normalize('NFKD', s.lower())\n    s = ''.join(c for c in s if not unicodedata.combining(c))\n    return re.sub(r'[^a-z0-9]+', '-', s).strip('-')\n")
 decl = {"result": json.loads(os.environ.get("FAKE_RESULT", '"pong"')), "deviations": ["none"], "files_changed": []}
+if mode == "hook":  # Stop hook adds a turn: declaration in an earlier assistant message, last message is the hook reply
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "summary\n```json\n" + json.dumps(decl) + "\n```"}]}})
 if mode == "limit":
     emit({"type": "result", "subtype": "error", "is_error": True, "result": "Claude usage limit reached", "session_id": sid}); sys.exit(1)
 res = {"type": "result", "subtype": "success", "is_error": False, "session_id": sid, "total_cost_usd": 0.01,
        "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2},
-       "result": "done" if mode == "nodecl" else "done\n```json\n" + json.dumps(decl) + "\n```"}
+       "result": "claim-gate: ok" if mode == "hook" else "done" if mode == "nodecl" else "done\n```json\n" + json.dumps(decl) + "\n```"}
 if "--json-schema" in a: res["structured_output"] = decl
 emit(res)

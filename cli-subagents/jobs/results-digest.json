@@ -1,0 +1,3 @@
+{"engine": "claude", "task": "~/cli-subagents/jobs/results-digest.task.md", "workdir": "~/agent-inbox/results-digest/work", "in_place": true, "access": "read-only",
+ "watch_dirs": ["/home/kendall/disentanglement-benchmarking/results", "/home/kendall/disentanglement-benchmarking/local_run/lab_pathway_results"],
+ "timeout": 3600}

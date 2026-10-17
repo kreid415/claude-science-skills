@@ -75,19 +75,22 @@ def report_line(engine, u, limits):
     parts = [f"{name.get(k, k)} used {round(float(v['utilization']) * 100, 1)}% (resets in {codex_usage._dur(v['resetsAt'] - time.time())})" for k, v in wins.items() if v.get("utilization") is not None]
     return "Claude (school) usage from CLI (utilization read as fraction of limit; undocumented, last run's event): " + ", ".join(parts) + ", status " + str((limits[-1].get("rate_limit_info") or {}).get("status"))
 
-def build_cmd(engine, wd, last_msg, access, model=None, effort=None, schema=None, resume=None, allowed=None, perm="dontAsk", is_git=True):
+def build_cmd(engine, wd, last_msg, access, model=None, effort=None, schema=None, resume=None, allowed=None, perm="dontAsk", is_git=True, agent=None, add_dirs=()):
     """schema: codex -> path to a JSON schema file; claude -> the schema as a JSON string. Prompt is always sent on stdin."""
     b = bin_path(engine)
     if engine == "codex":
         cmd = [b, "exec"] + (["resume"] if resume else []) + ["--json", "-o", last_msg]
         cmd += ["-c", f'sandbox_mode="{access}"'] if resume else ["-s", access, "-C", wd]  # `exec resume` has no -s/-C; cwd is set by the caller
         if not is_git: cmd.append("--skip-git-repo-check")
+        if add_dirs and access == "workspace-write" and not resume: cmd += [x for d in add_dirs for x in ("--add-dir", d)]  # codex: extra WRITABLE roots; a read-only sandbox already reads every path
         if model: cmd += ["-m", model]
         if effort: cmd += ["-c", f'model_reasoning_effort="{effort}"']
         if schema: cmd += ["--output-schema", schema]
         if resume: cmd.append(resume)
         return cmd + ["-"]
     cmd = [b, "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", perm, "--allowedTools", allowed or CLAUDE_TOOLS[access]]
+    if agent: cmd += ["--agent", agent]
+    cmd += [x for d in add_dirs for x in ("--add-dir", d)]
     if model: cmd += ["--model", model]
     if effort: cmd += ["--effort", effort]
     if schema: cmd += ["--json-schema", schema]
@@ -108,18 +111,22 @@ def parse_events(engine, path):
         else:
             if t == "system" and ev.get("subtype") == "init": o["session_id"] = ev.get("session_id") or o["session_id"]; o["model"] = ev.get("model")
             if "rate_limit" in t: o["limits"].append(ev)
+            if t == "assistant": o["decl_text"] = next((b["text"] for b in (ev.get("message") or {}).get("content") or [] if b.get("type") == "text" and "```json" in (b.get("text") or "")), o.get("decl_text"))
             if t == "result":
                 u = ev.get("usage") or {}
                 o.update(session_id=ev.get("session_id") or o["session_id"], message=ev.get("result"), structured=ev.get("structured_output"), error=bool(ev.get("is_error")), cost_usd=ev.get("total_cost_usd"), denials=ev.get("permission_denials"))
                 o["tokens"].update(input_tokens=u.get("input_tokens", 0) or 0, cached_input_tokens=u.get("cache_read_input_tokens", 0) or 0, output_tokens=u.get("output_tokens", 0) or 0)
                 o["tokens"]["cache_creation_input_tokens"] = u.get("cache_creation_input_tokens", 0) or 0
+    if o.get("decl_text") and o["structured"] is None and "```json" not in (o["message"] or ""): o["message"] = o["decl_text"]  # a Stop hook (e.g. claim-gate) can add a turn whose reply replaces the final message; the declaration was in the earlier one
     return o
 
 def run(engine, prompt, wd, out, access="workspace-write", model=None, effort=None, timeout=3600, resume=None, schema=None,
-        allowed=None, perm="dontAsk", min5=2, minw=1):
+        allowed=None, perm="dontAsk", min5=2, minw=1, agent=None, add_dirs=()):
     """One gated attempt. Returns (exit_code, rec); rec is also written to out/run.json (unless gated)."""
     if effort and effort not in EFFORTS[engine]: raise ValueError(f"effort {effort!r} not valid for {engine}: {EFFORTS[engine]}")
     if perm not in PERMISSION_MODES: raise ValueError(f"permission mode {perm!r} not allowed: {PERMISSION_MODES}")
+    if agent and engine != "claude": raise ValueError("--agent is claude-only (agents live in ~/.claude/agents)")
+    if add_dirs and engine == "codex" and resume: raise ValueError("--add-dir is not available with codex --resume")
     os.makedirs(out, exist_ok=True)
     wj = lambda n, o: open(os.path.join(out, n), "w").write(json.dumps(o, indent=1))
     u0 = read_usage(engine); wj("usage_before.json", u0)
@@ -132,7 +139,7 @@ def run(engine, prompt, wd, out, access="workspace-write", model=None, effort=No
     if schema:
         sch = json.dumps(schema)
         if engine == "codex": sch = os.path.join(out, "schema.json"); wj("schema.json", schema)
-    cmd = build_cmd(engine, wd, last_msg, access, model, effort, sch, resume, allowed, perm, is_git)
+    cmd = build_cmd(engine, wd, last_msg, access, model, effort, sch, resume, allowed, perm, is_git, agent, add_dirs)
     t0 = time.time(); ev_path = os.path.join(out, "events.jsonl")
     with open(ev_path, "w") as ev:
         try:

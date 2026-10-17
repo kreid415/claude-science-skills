@@ -1,7 +1,7 @@
 """Offline tests: python3 tests/test_cli_subagents.py   (claude is replaced by tests/fake_cli.py; codex is covered by the live canary --full)."""
-import json, os, shutil, subprocess, sys, tempfile, unittest
+import fcntl, json, os, shutil, subprocess, sys, tempfile, unittest
 T = os.path.dirname(os.path.abspath(__file__)); S = next(p for p in (os.path.join(os.path.dirname(T), "scripts"), os.path.dirname(T)) if os.path.exists(os.path.join(p, "agent_run.py"))); sys.path.insert(0, S)  # repo layout or flat host deploy
-import agent_run, agent_task, agent_canary, agent_ledger
+import agent_run, agent_task, agent_canary, agent_ledger, agent_inbox
 FAKE = os.path.join(T, "fake_cli.py"); os.chmod(FAKE, 0o755)
 
 class T_(unittest.TestCase):
@@ -35,6 +35,11 @@ class T_(unittest.TestCase):
         self.assertEqual(c1[1:3], ["exec", "resume"]); self.assertIn('sandbox_mode="workspace-write"', c1); self.assertEqual(c1[-2:], ["abc", "-"]); self.assertNotIn("-s", c1)
         self.assertEqual(c2[c2.index("--allowedTools") + 1], "Read,Glob,Grep"); self.assertEqual(c2[c2.index("--resume") + 1], "abc"); self.assertEqual(c2[c2.index("--permission-mode") + 1], "plan")
         for c in (c0, c1, c2): self.assertFalse([x for x in c if "danger" in x or "bypass" in x.lower()])
+        c3 = agent_run.build_cmd("claude", "/w", "/o", "read-only", agent="LIT", add_dirs=["/a", "/b"]); c4 = agent_run.build_cmd("codex", "/w", "/o", "workspace-write", add_dirs=["/a"], is_git=False)
+        self.assertEqual((c3[c3.index("--agent") + 1], [c3[i + 1] for i, x in enumerate(c3) if x == "--add-dir"]), ("LIT", ["/a", "/b"])); self.assertEqual(c4[c4.index("--add-dir") + 1], "/a")
+        for c in (agent_run.build_cmd("codex", "/w", "/o", "read-only", add_dirs=["/a"]), agent_run.build_cmd("codex", "/w", "/o", "workspace-write", resume="x", add_dirs=["/a"])): self.assertNotIn("--add-dir", c)  # read-only already reads all; resume has no --add-dir
+        with self.assertRaises(ValueError): agent_run.run("codex", "p", self.d, self.d, agent="LIT")
+        with self.assertRaises(ValueError): agent_run.run("codex", "p", self.d, self.d, resume="x", add_dirs=["/a"])
         with self.assertRaises(ValueError): agent_run.run("claude", "p", self.d, self.d, effort="ultra")
         with self.assertRaises(ValueError): agent_run.run("claude", "p", self.d, self.d, perm="bypassPermissions")
 
@@ -52,9 +57,45 @@ class T_(unittest.TestCase):
         self.assertEqual(self.task("--schema", os.path.join(self.d, "schema.json"), FAKE_RESULT="5")[0], 13)  # result violates schema -> UNDECLARED
         self.assertEqual(agent_run.report_line("claude", None, []), "Claude (school) remaining: not reported by CLI")
         rc, r4 = self.task(FAKE_MODE="nodecl"); self.assertEqual((rc, r4["status"]), (13, "UNDECLARED"))
+        rc, r4 = self.task(FAKE_MODE="hook"); self.assertEqual((rc, r4["status"], r4["declaration"]["result"]), (0, "DECLARED", "pong"))  # declaration recovered from the pre-hook message
         rc, r5 = self.task(FAKE_MODE="limit"); self.assertEqual((rc, r5["status"]), (12, "USAGE_LIMIT"))
         self.assertEqual(self.task("--effort", "ultra")[0], 2)
-        rows = agent_ledger.read(self.env["CLI_SUBAGENTS_LEDGER"]); self.assertEqual({(x["engine"], x["mode"]) for x in rows}, {("claude", "task")}); self.assertEqual(len(rows), 6)
+        rows = agent_ledger.read(self.env["CLI_SUBAGENTS_LEDGER"]); self.assertEqual({(x["engine"], x["mode"]) for x in rows}, {("claude", "task")}); self.assertEqual(len(rows), 7)
+
+    def test_task_agent_adddir(self):
+        ro = os.path.join(self.d, "ro"); os.makedirs(ro)
+        rc, r = self.task("--agent", "LIT", "--add-dir", ro, "--add-dir", self.d, "--access", "read-only")
+        argv = json.loads(open(self.env["FAKE_ARGV_LOG"]).readline())
+        self.assertEqual((rc, r["agent"], r["add_dirs"], argv[argv.index("--agent") + 1], [argv[i + 1] for i, x in enumerate(argv) if x == "--add-dir"]), (0, "LIT", [ro, self.d], "LIT", [ro, self.d]))
+        self.assertEqual(agent_ledger.read(self.env["CLI_SUBAGENTS_LEDGER"])[0]["agent"], "LIT")
+        out = os.path.join(self.d, "outx"); rc, so = self.sh("agent_task.py", os.path.join(self.d, "task.md"), "--engine", "codex", "--workdir", self.proj, "--out", out, "--agent", "LIT")
+        self.assertEqual((rc, "claude-only" in so), (2, True))
+        self.assertEqual(self.task("--add-dir", os.path.join(self.d, "missing"))[0], 2)
+
+    def test_schedule_inbox(self):
+        cron = os.path.join(self.d, "crontab"); inbox = os.path.join(self.d, "inbox"); watch = os.path.join(self.d, "watch"); os.makedirs(watch)
+        foreign = "MAILTO=x\n0 1 * * * /usr/bin/true # cli-subagents:job-x\n5 5 * * * echo hi # cli-subagents:job-ish extra\n"; open(cron, "w").write(foreign)
+        env = dict(self.env, CLI_SUBAGENTS_CRONTAB=cron, CLI_SUBAGENTS_INBOX=inbox)
+        open(os.path.join(self.d, "t.md"), "w").write("since={since} n={changed_count} list={changed_files_path} topics={file:" + os.path.join(self.d, "topics.txt") + "}"); open(os.path.join(self.d, "topics.txt"), "w").write("T1")
+        spec = os.path.join(self.d, "spec.json"); open(spec, "w").write(json.dumps({"engine": "claude", "task": os.path.join(self.d, "t.md"), "workdir": os.path.join(self.d, "wd"), "in_place": True, "watch_dirs": [watch], "agent": "LIT"}))
+        sh = lambda s, *a, **e: self.sh(s, *a, **dict(env, **e))
+        self.assertEqual(sh("agent_schedule.py", "add", "job", "--cron", "30 2 * * *", "--spec", spec)[0], 0); sh("agent_schedule.py", "add", "job", "--cron", "0 7 * * 1", "--spec", spec)  # second add replaces
+        self.assertEqual([json.loads(l)["name"] for l in sh("agent_schedule.py", "list")[1].splitlines()], ["job-x", "job"])  # prefix-sharing tag is separate; the line with trailing text is not a tag
+        self.assertEqual(sh("agent_schedule.py", "add", "bad", "--cron", "* * *", "--spec", spec)[0], 2)
+        self.assertEqual(sh("agent_schedule.py", "remove", "job")[0], 0); self.assertEqual(open(cron).read(), foreign); self.assertEqual(sh("agent_schedule.py", "remove", "job")[0], 1)
+        run = lambda **e: json.loads(sh("agent_schedule.py", "run", "job", "--spec", spec, **e)[1])
+        open(os.path.join(watch, "a.txt"), "w").write("x"); open(os.path.join(watch, ".hid"), "w").write("x")
+        e1 = run(); self.assertEqual((e1["status"], e1["read"]), ("DECLARED", False)); d1 = os.path.dirname(e1["result"])
+        task1 = open(os.path.join(d1, "task.md")).read(); self.assertIn("since=never n=1", task1); self.assertIn("topics=T1", task1); self.assertEqual(open(os.path.join(d1, "changed_files.txt")).read(), os.path.join(watch, "a.txt") + "\n")
+        self.assertIn("pong", open(e1["summary"]).read()); argv = json.loads(open(self.env["FAKE_ARGV_LOG"]).readline()); self.assertEqual(argv[argv.index("--agent") + 1], "LIT"); self.assertIn("Read,Glob,Grep", argv)
+        os.utime(os.path.join(watch, "a.txt"), (1e9, 1e9))  # timestamps are floored to the second, so a same-second file would be re-listed (safe direction)
+        e2 = run(); self.assertEqual(e2["status"], "NO_CHANGES"); self.assertEqual(len(open(self.env["FAKE_ARGV_LOG"]).readlines()), 1)  # nothing changed: agent not called
+        os.utime(os.path.join(watch, "a.txt"), (2e9, 2e9)); lk = open(os.path.join(inbox, "job", ".lock"), "w"); fcntl.flock(lk, fcntl.LOCK_EX)
+        self.assertEqual(run()["status"], "SKIPPED_LOCKED"); lk.close()
+        e4 = run(FAKE_MODE="limit"); self.assertEqual((e4["status"], e4["exit_code"]), ("USAGE_LIMIT", 12)); self.assertIn("since=" + e2["time"], open(os.path.join(os.path.dirname(e4["result"]), "task.md")).read())
+        os.environ["CLI_SUBAGENTS_INBOX"] = inbox; ids = [json.loads(l)["id"] for l in sh("agent_inbox.py", "list", "--unread")[1].splitlines()]; self.assertEqual(len(ids), 3)  # DECLARED, SKIPPED_LOCKED, USAGE_LIMIT (NO_CHANGES is pre-read)
+        self.assertEqual(sh("agent_inbox.py", "mark-read")[0], 2); self.assertEqual(json.loads(sh("agent_inbox.py", "mark-read", ids[0])[1]), {"marked": 1}); self.assertEqual(len(sh("agent_inbox.py", "list", "--unread")[1].splitlines()), 2)
+        self.assertEqual(json.loads(sh("agent_inbox.py", "mark-read", "--all")[1]), {"marked": 2}); self.assertEqual(sh("agent_inbox.py", "list", "--unread")[1], ""); del os.environ["CLI_SUBAGENTS_INBOX"]
 
     def test_loop_claude(self):
         rc, so = self.sh("agent_loop.py", os.path.join(self.d, "task.md"), self.proj, "--engine", "claude", "--accept", f"{sys.executable} {self.d}/accept.py", "--accept-file", f"{self.d}/accept.py")
