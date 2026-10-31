@@ -20,4 +20,5 @@ if python "$ROOT/tests/codex-offload_loop_tests.py" > /tmp/col_out.txt 2>&1; the
 if python "$ROOT/tests/session-handoff_tests.py" > /tmp/sh_out.txt 2>&1; then echo "PASS session-handoff: $(tail -1 /tmp/sh_out.txt)"; else echo "FAIL session-handoff"; tail -20 /tmp/sh_out.txt; fail=1; fi
 if python "$ROOT/tests/phase-delegation_tests.py" > /tmp/pd_out.txt 2>&1; then echo "PASS phase-delegation: $(tail -1 /tmp/pd_out.txt)"; else echo "FAIL phase-delegation"; tail -20 /tmp/pd_out.txt; fail=1; fi
 if python "$ROOT/tests/job-watch_tests.py" > /tmp/jw_out.txt 2>&1; then echo "PASS job-watch: $(tail -1 /tmp/jw_out.txt)"; else echo "FAIL job-watch"; tail -20 /tmp/jw_out.txt; fail=1; fi
+if python -m pytest -q "$ROOT/tests/cluster-rules_tests.py" > /tmp/cr_out.txt 2>&1; then echo "PASS cluster-rules: $(tail -1 /tmp/cr_out.txt)"; else echo "FAIL cluster-rules"; tail -20 /tmp/cr_out.txt; fail=1; fi
 exit $fail
